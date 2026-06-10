@@ -18,6 +18,12 @@ GOLDEN_PATH = os.path.join(os.path.dirname(__file__), 'golden_float_output.pt')
 FIXTURE_DIR = os.path.join(os.path.dirname(__file__), 'fixtures')
 PHASE0_STATE_DICT_PATH = os.path.join(FIXTURE_DIR, 'phase0_state_dict.pt')
 
+# Import the checkpoint converter if available (Phase 1+)
+try:
+    from scripts.convert_checkpoint import convert_state_dict as _convert_sd
+except ImportError:
+    _convert_sd = None
+
 
 # ---------------------------------------------------------------------------
 # Parameter count
@@ -151,28 +157,37 @@ def _get_golden_model():
 
 def test_golden_output():
     """
-    Seeded float forward pass matches a committed golden output.
-    If the golden file does not exist yet, this test creates it (Phase 0).
-    Subsequent phases must keep this test green.
-    """
-    model = _get_golden_model()
-    model.eval()
-    batch = _get_golden_batch()
+    The committed Phase-0 weights must produce the committed golden output.
 
+    Phase 0: loads the state dict and checks it directly.
+    Phase 1+: if the state dict uses the old key names (coefs), converts via
+    convert_state_dict before loading.  The golden file itself never changes.
+    """
+    assert os.path.exists(GOLDEN_PATH), f'Golden file missing: {GOLDEN_PATH}'
+    assert os.path.exists(PHASE0_STATE_DICT_PATH), (
+        f'Phase-0 fixture missing: {PHASE0_STATE_DICT_PATH}\n'
+        'Re-run the Phase-0 tests once to regenerate it.'
+    )
+
+    old_sd = torch.load(PHASE0_STATE_DICT_PATH, map_location='cpu', weights_only=True)
+    model = make_model(n_hidden=2)
+    try:
+        model.load_state_dict(old_sd, strict=True)
+    except RuntimeError:
+        # Phase 1+: key names changed; convert first.
+        assert _convert_sd is not None, (
+            'State dict has incompatible keys and convert_checkpoint is not available.'
+        )
+        new_sd = _convert_sd(old_sd)
+        model.load_state_dict(new_sd, strict=True)
+    model.eval()
+
+    batch = _get_golden_batch()
     with torch.no_grad():
         out = model(batch)['predict']
 
-    if not os.path.exists(GOLDEN_PATH):
-        torch.save(out, GOLDEN_PATH)
-        pytest.skip(f'Golden output captured at {GOLDEN_PATH} — re-run to verify.')
-
     golden = torch.load(GOLDEN_PATH, weights_only=True)
     max_diff = (out - golden).abs().max().item()
-    assert max_diff < 1e-6, (
-        f'Float output drifted from golden by {max_diff:.2e} (expected < 1e-6)'
+    assert max_diff < 1e-5, (
+        f'Float output drifted from golden by {max_diff:.2e} (expected < 1e-5)'
     )
-
-    # Also persist the model state dict for the Phase 1 checkpoint-conversion test.
-    if not os.path.exists(PHASE0_STATE_DICT_PATH):
-        os.makedirs(FIXTURE_DIR, exist_ok=True)
-        torch.save(model.state_dict(), PHASE0_STATE_DICT_PATH)

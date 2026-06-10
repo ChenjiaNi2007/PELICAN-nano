@@ -6,6 +6,16 @@ from .perm_equiv_layers import eops_1_to_2, eops_2_to_2, eops_2_to_1, eops_2_to_
 from .generic_layers import get_activation_fn, MessageNet, BasicMLP, SoftMask
 from .masked_batchnorm import MaskedBatchNorm3d
 
+
+class _MixingLinear(nn.Linear):
+    """
+    nn.Linear subclass used for the equivariant mixing step in Eq2to2/Eq2to0.
+
+    Using a subclass keeps init_weights (which checks type(m) == nn.Linear strictly)
+    from reinitialising these layers, so the weight init done in __init__ is preserved.
+    """
+    pass
+
 # class Eq1to1(nn.Module):
 #     def __init__(self, in_dim, out_dim, ops_func=None, activation = 'leakyrelu', device=torch.device('cpu'), dtype=torch.float):
 #         super(Eq1to1, self).__init__()
@@ -51,13 +61,22 @@ class Eq2to0(nn.Module):
         self.ops_func = eops_2_to_0
         if factorize:
             self.coefs00 = nn.Parameter(torch.normal(0, np.sqrt(1. / self.basis_dim), (in_dim, self.basis_dim), device=device, dtype=dtype))
-            self.coefs01 = nn.Parameter(torch.normal(0, np.sqrt(1. / self.basis_dim), (out_dim, self.basis_dim), device=device, dtype=dtype))            
+            self.coefs01 = nn.Parameter(torch.normal(0, np.sqrt(1. / self.basis_dim), (out_dim, self.basis_dim), device=device, dtype=dtype))
             self.coefs10 = nn.Parameter(torch.normal(0, np.sqrt(2. / in_dim), (in_dim, out_dim), device=device, dtype=dtype))
             self.coefs11 = nn.Parameter(torch.normal(0, np.sqrt(2. / in_dim), (in_dim, out_dim), device=device, dtype=dtype))
+            # bias kept as separate Parameter when factorize=True
+            self.bias = nn.Parameter(torch.zeros(1, out_dim, device=device, dtype=dtype))
         else:
-            self.coefs = nn.Parameter(torch.normal(0, np.sqrt(4./(in_dim * self.basis_dim)), (in_dim, out_dim, self.basis_dim), device=device, dtype=dtype))
-        
-        self.bias = nn.Parameter(torch.zeros(1, out_dim, device=device, dtype=dtype))
+            # mixing replaces the coefs einsum; bias is absorbed into the Linear.
+            # _MixingLinear subclass prevents init_weights from overwriting this init.
+            self.mixing = _MixingLinear(in_dim * self.basis_dim, out_dim, bias=True,
+                                        device=device, dtype=dtype)
+            with torch.no_grad():
+                self.mixing.weight.copy_(
+                    torch.normal(0, np.sqrt(4. / (in_dim * self.basis_dim)),
+                                 (out_dim, in_dim * self.basis_dim))
+                )
+                self.mixing.bias.zero_()
         self.to(device=device, dtype=dtype)
 
     def forward(self, inputs, mask=None, nobj=None, irc_weight=None):
@@ -75,25 +94,24 @@ class Eq2to0(nn.Module):
                 op = self.ops_func(inputs, nobj=nobj, nobj_avg=self.average_nobj, aggregation=d[char.lower()], weight=irc_weight)
                 mult = (nobj).view([-1,1,1])**self.alphas[i].view(1,self.in_dim,2)
                 mult = mult / (self.average_nobj** self.alphas[i].view(1,self.in_dim,2))
-                op = op * mult            
+                op = op * mult
             else:
                 raise ValueError("args.config must consist of the following letters: smxnSMXN", self.config)
             ops.append(op)
 
-
-        ops = torch.cat(ops, dim=2)
+        ops = torch.cat(ops, dim=2)  # [B, in_dim, basis_dim]
 
         if self.activate_agg:
             ops = self.activation_fn(ops)
 
         if self.factorize:
             coefs = self.coefs00.unsqueeze(1) * self.coefs10.unsqueeze(-1) + self.coefs01.unsqueeze(0) * self.coefs11.unsqueeze(-1)
+            output = torch.einsum('dsb,ndb->ns', coefs, ops)
+            output = output + self.bias
         else:
-            coefs = self.coefs
-
-        output = torch.einsum('dsb,ndb->ns', coefs, ops)
-
-        output = output + self.bias
+            B = ops.shape[0]
+            ops_flat = ops.reshape(B, self.in_dim * self.basis_dim)  # [B, in_dim*basis_dim]
+            output = self.mixing(ops_flat)                            # [B, out_dim]
 
         if self.activate_lin:
             output = self.activation_fn(output)
@@ -272,7 +290,6 @@ class Eq2to2(nn.Module):
 
         self.alphas = nn.ParameterList([None] * len(config))
         self.dummy_alphas = torch.zeros(in_dim, device=device, dtype=dtype)
-        # countM = 0
         for i, char in enumerate(config):
             if char in ['M', 'X', 'N', 'S']:
                 self.alphas[i] = nn.Parameter(torch.rand(in_dim, 5, device=device, dtype=dtype))
@@ -281,11 +298,20 @@ class Eq2to2(nn.Module):
         self.in_dim = in_dim
         if factorize:
             self.coefs00 = nn.Parameter(torch.normal(0, np.sqrt(1. / self.basis_dim), (in_dim, self.basis_dim), device=device, dtype=dtype))
-            self.coefs01 = nn.Parameter(torch.normal(0, np.sqrt(1. / self.basis_dim), (out_dim, self.basis_dim), device=device, dtype=dtype))            
-            self.coefs10 = nn.Parameter(torch.normal(0, np.sqrt(1. / in_dim), (in_dim, out_dim), device=device, dtype=dtype))   # Replace 1. with 2. when using ELU/GELU, leave 1. for LeakyReLU
-            self.coefs11 = nn.Parameter(torch.normal(0, np.sqrt(1. / in_dim), (in_dim, out_dim), device=device, dtype=dtype))   # Replace 1. with 2. when using ELU/GELU, leave 1. for LeakyReLU
+            self.coefs01 = nn.Parameter(torch.normal(0, np.sqrt(1. / self.basis_dim), (out_dim, self.basis_dim), device=device, dtype=dtype))
+            self.coefs10 = nn.Parameter(torch.normal(0, np.sqrt(1. / in_dim), (in_dim, out_dim), device=device, dtype=dtype))
+            self.coefs11 = nn.Parameter(torch.normal(0, np.sqrt(1. / in_dim), (in_dim, out_dim), device=device, dtype=dtype))
         else:
-            self.coefs = nn.Parameter(torch.normal(0, np.sqrt(2./(in_dim * self.basis_dim)), (in_dim, out_dim, self.basis_dim), device=device, dtype=dtype))
+            # mixing replaces the coefs einsum; bias and diag_bias stay separate Parameters
+            # because diag_bias adds different values on and off the diagonal.
+            # _MixingLinear subclass prevents init_weights from overwriting this init.
+            self.mixing = _MixingLinear(in_dim * self.basis_dim, out_dim, bias=False,
+                                        device=device, dtype=dtype)
+            with torch.no_grad():
+                self.mixing.weight.copy_(
+                    torch.normal(0, np.sqrt(2. / (in_dim * self.basis_dim)),
+                                 (out_dim, in_dim * self.basis_dim))
+                )
         self.bias = nn.Parameter(torch.zeros(out_dim, device=device, dtype=dtype))
         self.diag_bias = nn.Parameter(torch.zeros(out_dim, device=device, dtype=dtype))
 
@@ -309,7 +335,7 @@ class Eq2to2(nn.Module):
                         alphas = torch.cat([self.dummy_alphas.view(1,self.in_dim,1,1,1), self.alphas[0].view(1,self.in_dim,5,1,1)], dim=2)
                     else:
                         alphas = self.alphas[i].view(1,self.in_dim,6,1,1)
-                    
+
                     mult = (nobj).view([-1,1,1,1,1])**alphas
                     mult = mult / (self.average_nobj**alphas)
                     op = op * mult
@@ -318,23 +344,25 @@ class Eq2to2(nn.Module):
             if softmask_ir is not None:
                 s = op.shape
                 softmask_ir = torch.cat([
-                                        torch.ones([s[0],1,3,s[-2],s[-1]], device=op.device), 
+                                        torch.ones([s[0],1,3,s[-2],s[-1]], device=op.device),
                                         softmask_ir.expand([s[0],1,12,s[-2],s[-1]])
                                         ], 2)
                 op = op*softmask_ir
             ops.append(op)
 
-        ops = torch.cat(ops, dim=2)
+        ops = torch.cat(ops, dim=2)  # [B, in_dim, total_basis, N, N]
 
         if self.activate_agg:
             ops = self.activation_fn(ops)
 
         if self.factorize:
             coefs = self.coefs00.unsqueeze(1) * self.coefs10.unsqueeze(-1) + self.coefs01.unsqueeze(0) * self.coefs11.unsqueeze(-1)
+            output = torch.einsum('dsb,ndbij->nijs', coefs, ops)
         else:
-            coefs = self.coefs
-        
-        output = torch.einsum('dsb,ndbij->nijs', coefs, ops)
+            B, _, _, N, _ = ops.shape
+            # ops: [B, in_dim, total_basis, N, N] → [B, N, N, in_dim*total_basis]
+            ops_flat = ops.permute(0, 3, 4, 1, 2).reshape(B, N, N, self.in_dim * ops.shape[2])
+            output = self.mixing(ops_flat)  # [B, N, N, out_dim]
 
         diag_eye = torch.eye(inputs.shape[1], device=self.device, dtype=self.dtype).unsqueeze(0).unsqueeze(-1)
         diag_bias = diag_eye.multiply(self.diag_bias.view(1,1,1,-1))
