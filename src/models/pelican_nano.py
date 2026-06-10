@@ -61,8 +61,6 @@ class PELICANNano(nn.Module):
         particle_scalars, particle_mask, edge_mask, event_momenta = self.prepare_input(data)
         dot_products = dot4(event_momenta.unsqueeze(1), event_momenta.unsqueeze(2))
         inputs = dot_products.unsqueeze(-1)
-        print(f"Jet mass {inputs[0].sum().sqrt()}")
-        print(f"is_signal {data['is_signal'][0]}")
         # regular multiplicity
         nobj = particle_mask.sum(-1, keepdim=True)
 

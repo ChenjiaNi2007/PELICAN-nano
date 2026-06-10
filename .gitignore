@@ -18,6 +18,7 @@ __pycache__/
 *.DS*
 *.log
 *.pt
+!tests/golden_float_output.pt
 *.db
 *.ipynb
 .ipynb_checkpoints

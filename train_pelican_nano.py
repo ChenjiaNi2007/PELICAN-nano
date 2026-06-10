@@ -5,15 +5,18 @@ import numpy
 import random
 
 from src.trainer import which
+name, mem = '', 0
 if which('nvidia-smi') is not None:
-    min=8000
-    deviceid = 0
-    name, mem = os.popen('"nvidia-smi" --query-gpu=gpu_name,memory.total --format=csv,nounits,noheader').read().split('\n')[deviceid].split(',')
-    print(mem)
-    mem = int(mem)
-    if mem < min:
-        print('Less GPU memory than requested. Terminating.')
-        sys.exit()
+    _min_mem = 8000
+    _deviceid = 0
+    try:
+        _line = os.popen('"nvidia-smi" --query-gpu=gpu_name,memory.total --format=csv,nounits,noheader').read().split('\n')[_deviceid]
+        name, mem = _line.split(',')
+        mem = int(mem)
+        if mem < _min_mem:
+            print(f'Less GPU memory ({mem} MB) than requested ({_min_mem} MB). Will try to continue.')
+    except Exception:
+        pass
 
 logger = logging.getLogger('')
 

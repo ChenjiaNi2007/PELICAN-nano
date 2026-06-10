@@ -1,0 +1,7 @@
+torch>=1.11
+brevitas==0.12.*
+h5py
+scikit-learn
+colorlog
+pytest
+numpy
