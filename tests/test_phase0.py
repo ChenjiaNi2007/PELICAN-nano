@@ -15,6 +15,8 @@ import pytest
 from tests.conftest import make_batch, make_model
 
 GOLDEN_PATH = os.path.join(os.path.dirname(__file__), 'golden_float_output.pt')
+FIXTURE_DIR = os.path.join(os.path.dirname(__file__), 'fixtures')
+PHASE0_STATE_DICT_PATH = os.path.join(FIXTURE_DIR, 'phase0_state_dict.pt')
 
 
 # ---------------------------------------------------------------------------
@@ -169,3 +171,8 @@ def test_golden_output():
     assert max_diff < 1e-6, (
         f'Float output drifted from golden by {max_diff:.2e} (expected < 1e-6)'
     )
+
+    # Also persist the model state dict for the Phase 1 checkpoint-conversion test.
+    if not os.path.exists(PHASE0_STATE_DICT_PATH):
+        os.makedirs(FIXTURE_DIR, exist_ok=True)
+        torch.save(model.state_dict(), PHASE0_STATE_DICT_PATH)
