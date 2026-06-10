@@ -29,7 +29,7 @@ from src.trainer import Trainer
 from src.trainer import init_argparse, init_file_paths, init_logger, init_cuda, logging_printout, fix_args
 from src.trainer import init_optimizer, init_scheduler
 from src.models.metrics_classifier import metrics, minibatch_metrics, minibatch_metrics_string
-
+from src.layers.quant import QuantConfig
 
 from src.dataloaders import initialize_datasets, collate_fn
 
@@ -78,14 +78,26 @@ def main():
                                      collate_fn=collate)
                    for split, dataset in datasets.items()}
 
+    # Build quantization config (disabled by default)
+    quant_config = QuantConfig(
+        enabled=args.quant,
+        weight_bit_width=args.weight_bit_width,
+        act_bit_width=args.act_bit_width,
+        input_bit_width=args.input_bit_width,
+        weight_per_channel=args.weight_per_channel,
+        po2_scales=args.po2_scales,
+        allow_alpha_scaling=args.allow_alpha_scaling,
+    )
+
     # Initialize model
-    model = PELICANNano( args.n_hidden,
-                      activate_agg=args.activate_agg, activate_lin=args.activate_lin,
-                      activation=args.activation, add_beams=args.add_beams, config=args.config, config_out=args.config_out, average_nobj=args.nobj_avg,
-                      factorize=args.factorize, masked=args.masked,
-                      activate_agg_out=args.activate_agg_out, activate_lin_out=args.activate_lin_out,
-                      scale=args.scale, dropout = args.dropout, drop_rate=args.drop_rate, drop_rate_out=args.drop_rate_out, batchnorm=args.batchnorm,
-                      device=device, dtype=dtype)
+    model = PELICANNano(args.n_hidden,
+                        activate_agg=args.activate_agg, activate_lin=args.activate_lin,
+                        activation=args.activation, add_beams=args.add_beams, config=args.config, config_out=args.config_out, average_nobj=args.nobj_avg,
+                        factorize=args.factorize, masked=args.masked,
+                        activate_agg_out=args.activate_agg_out, activate_lin_out=args.activate_lin_out,
+                        scale=args.scale, dropout=args.dropout, drop_rate=args.drop_rate, drop_rate_out=args.drop_rate_out, batchnorm=args.batchnorm,
+                        quant_config=quant_config,
+                        device=device, dtype=dtype)
     
     model.to(device)
 

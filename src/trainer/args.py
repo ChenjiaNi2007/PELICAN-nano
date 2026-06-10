@@ -219,6 +219,22 @@ def setup_argparse():
     parser.add_argument('--weight-init', type=str, default='randn', metavar='str',
                         help='Weight initialization function to use (default: rand)')
 
+    # Quantization-Aware Training (QAT) options
+    parser.add_argument('--quant', action=argparse.BooleanOptionalAction, default=False,
+                        help='Enable Brevitas Quantization-Aware Training (default: False)')
+    parser.add_argument('--weight-bit-width', type=int, default=8, metavar='N',
+                        help='Bit width for weight quantization (default: 8)')
+    parser.add_argument('--act-bit-width', type=int, default=8, metavar='N',
+                        help='Bit width for activation quantization (default: 8)')
+    parser.add_argument('--input-bit-width', type=int, default=8, metavar='N',
+                        help='Bit width for input (d_ij) quantization (default: 8)')
+    parser.add_argument('--weight-per-channel', action=argparse.BooleanOptionalAction, default=False,
+                        help='Use per-channel weight quantization (default: False)')
+    parser.add_argument('--po2-scales', action=argparse.BooleanOptionalAction, default=False,
+                        help='Restrict quantization scales to powers of two (default: False)')
+    parser.add_argument('--allow-alpha-scaling', action=argparse.BooleanOptionalAction, default=False,
+                        help='Allow N^alpha config chars (S/M/X/N) under QAT (default: False)')
+
     return parser
 
 
