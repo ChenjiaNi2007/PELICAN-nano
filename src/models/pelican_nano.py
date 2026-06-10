@@ -2,10 +2,20 @@ import torch
 import torch.nn as nn
 
 import logging
+from typing import Optional
 
 from .lorentz_metric import dot4
 from ..layers import Net2to2, Eq2to0, MessageNet
+from ..layers.quant import QuantConfig
 from ..trainer import init_weights
+
+try:
+    import brevitas.nn as _bnn
+    _BREVITAS_AVAILABLE = True
+except ImportError:
+    _bnn = None
+    _BREVITAS_AVAILABLE = False
+
 
 class PELICANNano(nn.Module):
     """
@@ -14,7 +24,8 @@ class PELICANNano(nn.Module):
     def __init__(self, n_hidden,
                  activate_agg=False, activate_lin=True, activation='leakyrelu', add_beams=True, config='s', config_out='s', average_nobj=49, factorize=False, masked=True,
                  activate_agg_out=True, activate_lin_out=False,
-                 scale=1, dropout = True, drop_rate=0.05, drop_rate_out=0.05, batchnorm=None,
+                 scale=1, dropout=True, drop_rate=0.05, drop_rate_out=0.05, batchnorm=None,
+                 quant_config: Optional[QuantConfig] = None,
                  device=torch.device('cpu'), dtype=None):
         super().__init__()
 
@@ -32,20 +43,48 @@ class PELICANNano(nn.Module):
         self.factorize = factorize
         self.masked = masked
 
+        _use_quant = quant_config is not None and quant_config.enabled
+
+        if _use_quant and not _BREVITAS_AVAILABLE:
+            raise ImportError('brevitas is required for quantization. Install it with: pip install brevitas')
+
+        # D5: uppercase config chars require explicit opt-in
+        if _use_quant and any(c in 'SMXN' for c in (config + config_out)):
+            if not quant_config.allow_alpha_scaling:
+                raise NotImplementedError(
+                    "config contains uppercase chars (N^alpha scaling). "
+                    "Pass quant_config.allow_alpha_scaling=True to opt in."
+                )
+
         if dropout:
             self.dropout_layer = nn.Dropout(drop_rate)
             self.dropout_layer_out = nn.Dropout(drop_rate_out)
 
+        # D3: QuantIdentity at the d_ij input boundary (heavy-tailed, needs learned scale)
+        if _use_quant:
+            from ..layers.quant import make_act_quant
+            self.input_quant = _bnn.QuantIdentity(
+                act_quant=make_act_quant(quant_config, quant_config.input_bit_width),
+                return_quant_tensor=True,
+            )
+            self.output_quant = _bnn.QuantIdentity(
+                act_quant=make_act_quant(quant_config),
+                return_quant_tensor=False,
+            )
+        else:
+            self.input_quant = None
+            self.output_quant = None
+
         # This is the main part of the network -- a sequence of permutation-equivariant 2->2 blocks
         # Each 2->2 block consists of a component-wise messaging layer that mixes channels, followed by the equivariant aggegration over particle indices
-        self.net2to2 = Net2to2([1, n_hidden], [[]], activate_agg=activate_agg, activate_lin=activate_lin, activation = activation, dropout=dropout, drop_rate=drop_rate, batchnorm = batchnorm, config=config, average_nobj=average_nobj, factorize=factorize, masked=masked, device = device, dtype = dtype)
-        
+        self.net2to2 = Net2to2([1, n_hidden], [[]], activate_agg=activate_agg, activate_lin=activate_lin, activation=activation, dropout=dropout, drop_rate=drop_rate, batchnorm=batchnorm, config=config, average_nobj=average_nobj, factorize=factorize, masked=masked, quant_config=quant_config, device=device, dtype=dtype)
+
         # The final equivariant block is 2->1 and is defined here manually as a messaging (BatchNorm) layer followed by the 2->0 aggregation layer
         # This messaging layer actually reduces to nothing but a BatchNorm
-        self.msg_2to0 = MessageNet([n_hidden], activation=activation, batchnorm=batchnorm, device=device, dtype=dtype)   
-        # This aggregation layer applies 2 aggregators and mixes them down to 1 output classification score (positive=predicted signal)    
-        self.agg_2to0 = Eq2to0(n_hidden, 1, activate_agg=activate_agg_out, activate_lin=activate_lin_out, activation = activation, config=config_out, factorize=False, average_nobj=average_nobj, device = device, dtype = dtype)
-        
+        self.msg_2to0 = MessageNet([n_hidden], activation=activation, batchnorm=batchnorm, device=device, dtype=dtype)
+        # This aggregation layer applies 2 aggregators and mixes them down to 1 output classification score (positive=predicted signal)
+        self.agg_2to0 = Eq2to0(n_hidden, 1, activate_agg=activate_agg_out, activate_lin=activate_lin_out, activation=activation, config=config_out, factorize=False, average_nobj=average_nobj, quant_config=quant_config, device=device, dtype=dtype)
+
         self.apply(init_weights)
 
         logging.info('_________________________\n')
@@ -61,22 +100,32 @@ class PELICANNano(nn.Module):
         particle_scalars, particle_mask, edge_mask, event_momenta = self.prepare_input(data)
         dot_products = dot4(event_momenta.unsqueeze(1), event_momenta.unsqueeze(2))
         inputs = dot_products.unsqueeze(-1)
+
+        # D3: quantize d_ij at the network input boundary
+        if self.input_quant is not None:
+            inputs = self.input_quant(inputs)
+
         # regular multiplicity
         nobj = particle_mask.sum(-1, keepdim=True)
 
         # Apply the sequence of PELICAN equivariant 2->2 blocks with the IRC weighting.
-        act1 = self.net2to2(inputs, mask = edge_mask.unsqueeze(-1), nobj = nobj)
-        
+        act1 = self.net2to2(inputs, mask=edge_mask.unsqueeze(-1), nobj=nobj)
+
         # The last equivariant 2->0 block is constructed here by hand: message layer, dropout, and Eq2to0.
         act2 = self.msg_2to0(act1, mask=edge_mask.unsqueeze(-1))
         if self.dropout:
             act2 = self.dropout_layer(act2)
-        act3 = self.agg_2to0(act2, nobj = nobj)
+        act3 = self.agg_2to0(act2, nobj=nobj)
 
         # The output layer applies dropout and an MLP.
         if self.dropout:
             act3 = self.dropout_layer_out(act3)
-        prediction = torch.cat([-act3, act3], axis = -1)
+
+        # D2: quantize logit at the network output boundary
+        if self.output_quant is not None:
+            act3 = self.output_quant(act3)
+
+        prediction = torch.cat([-act3, act3], axis=-1)
 
         if torch.isnan(prediction).any():
             logging.info(f"inputs: {torch.isnan(inputs).any()}")

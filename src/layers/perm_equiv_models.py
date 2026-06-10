@@ -1,10 +1,21 @@
+from __future__ import annotations
+
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from typing import Optional
 from .perm_equiv_layers import eops_1_to_2, eops_2_to_2, eops_2_to_1, eops_2_to_0 #, eset_ops_3_to_3, eset_ops_4_to_4, eset_ops_1_to_3, eops_1_to_2
 from .generic_layers import get_activation_fn, MessageNet, BasicMLP, SoftMask
 from .masked_batchnorm import MaskedBatchNorm3d
+from .quant import QuantConfig, make_weight_quant, make_act_quant
+
+try:
+    import brevitas.nn as _bnn
+    _BREVITAS_AVAILABLE = True
+except ImportError:
+    _bnn = None
+    _BREVITAS_AVAILABLE = False
 
 
 class _MixingLinear(nn.Linear):
@@ -39,7 +50,7 @@ class _MixingLinear(nn.Linear):
 #         return output
 
 class Eq2to0(nn.Module):
-    def __init__(self, in_dim, out_dim, activate_agg=False, activate_lin=True, activation = 'leakyrelu', config='s', factorize=True, average_nobj=49, device=torch.device('cpu'), dtype=torch.float):
+    def __init__(self, in_dim, out_dim, activate_agg=False, activate_lin=True, activation='leakyrelu', config='s', factorize=True, average_nobj=49, quant_config: Optional[QuantConfig] = None, device=torch.device('cpu'), dtype=torch.float):
         super(Eq2to0, self).__init__()
         self.device = device
         self.dtype = dtype
@@ -48,6 +59,8 @@ class Eq2to0(nn.Module):
         self.activation_fn = get_activation_fn(activation)
         self.config = config
         self.factorize = factorize
+        self.quant_config = quant_config
+        _use_quant = quant_config is not None and quant_config.enabled
 
         self.average_nobj = average_nobj                 # 50 is the mean number of particles per event in the toptag dataset; ADJUST FOR YOUR DATASET
         self.basis_dim = 2 * len(config)
@@ -67,16 +80,40 @@ class Eq2to0(nn.Module):
             # bias kept as separate Parameter when factorize=True
             self.bias = nn.Parameter(torch.zeros(1, out_dim, device=device, dtype=dtype))
         else:
-            # mixing replaces the coefs einsum; bias is absorbed into the Linear.
-            # _MixingLinear subclass prevents init_weights from overwriting this init.
-            self.mixing = _MixingLinear(in_dim * self.basis_dim, out_dim, bias=True,
-                                        device=device, dtype=dtype)
-            with torch.no_grad():
-                self.mixing.weight.copy_(
-                    torch.normal(0, np.sqrt(4. / (in_dim * self.basis_dim)),
-                                 (out_dim, in_dim * self.basis_dim))
-                )
-                self.mixing.bias.zero_()
+            _mixing_in = in_dim * self.basis_dim
+            _w_init = torch.normal(0, np.sqrt(4. / _mixing_in), (out_dim, _mixing_in))
+
+            if _use_quant:
+                if not _BREVITAS_AVAILABLE:
+                    raise ImportError('brevitas is required for quant_config.enabled=True')
+                self.post_agg_quant = _bnn.QuantIdentity(
+                    act_quant=make_act_quant(quant_config), return_quant_tensor=False)
+                self.mixing = _bnn.QuantLinear(
+                    _mixing_in, out_dim, bias=True,
+                    weight_quant=make_weight_quant(quant_config),
+                    bias_quant=None,   # float bias (D6)
+                    input_quant=None,
+                    output_quant=None,
+                    return_quant_tensor=False)
+                with torch.no_grad():
+                    self.mixing.weight.copy_(_w_init)
+                    self.mixing.bias.zero_()
+                # activation quantizer (unused in default nano: activate_lin_out=False)
+                if activate_lin:
+                    if activation.lower() == 'relu':
+                        self.act_layer = _bnn.QuantReLU(
+                            act_quant=make_act_quant(quant_config), return_quant_tensor=False)
+                    else:
+                        self.act_layer = nn.Sequential(
+                            get_activation_fn(activation),
+                            _bnn.QuantIdentity(act_quant=make_act_quant(quant_config), return_quant_tensor=False))
+            else:
+                # Float path: _MixingLinear subclass skips init_weights reinit
+                self.mixing = _MixingLinear(_mixing_in, out_dim, bias=True,
+                                            device=device, dtype=dtype)
+                with torch.no_grad():
+                    self.mixing.weight.copy_(_w_init)
+                    self.mixing.bias.zero_()
         self.to(device=device, dtype=dtype)
 
     def forward(self, inputs, mask=None, nobj=None, irc_weight=None):
@@ -85,6 +122,7 @@ class Eq2to0(nn.Module):
         Returns: N x D x m
         '''
         d = {'s': 'sum', 'm': 'mean', 'x': 'max', 'n': 'min'}
+        _use_quant = self.quant_config is not None and self.quant_config.enabled
 
         ops = []
         for i, char in enumerate(self.config):
@@ -111,10 +149,15 @@ class Eq2to0(nn.Module):
         else:
             B = ops.shape[0]
             ops_flat = ops.reshape(B, self.in_dim * self.basis_dim)  # [B, in_dim*basis_dim]
+            if _use_quant:
+                ops_flat = self.post_agg_quant(ops_flat)
             output = self.mixing(ops_flat)                            # [B, out_dim]
 
         if self.activate_lin:
-            output = self.activation_fn(output)
+            if _use_quant and not self.factorize:
+                output = self.act_layer(output)
+            else:
+                output = self.activation_fn(output)
 
         if mask is not None:
             output = output * mask
@@ -273,7 +316,7 @@ class Eq2to1(nn.Module):
         return output
 
 class Eq2to2(nn.Module):
-    def __init__(self, in_dim, out_dim, ops_func=None, activate_agg=False, activate_lin=True, activation = 'leakyrelu', config='s', factorize=True, folklore=False, average_nobj=49, device=torch.device('cpu'), dtype=torch.float):
+    def __init__(self, in_dim, out_dim, ops_func=None, activate_agg=False, activate_lin=True, activation='leakyrelu', config='s', factorize=True, folklore=False, average_nobj=49, quant_config: Optional[QuantConfig] = None, device=torch.device('cpu'), dtype=torch.float):
         super(Eq2to2, self).__init__()
         self.device = device
         self.dtype = dtype
@@ -281,12 +324,23 @@ class Eq2to2(nn.Module):
         self.activate_lin = activate_lin
         self.activation_fn = get_activation_fn(activation)
         self.config = config
-        self.factorize=factorize
+        self.factorize = factorize
         self.folklore = folklore
+        self.quant_config = quant_config
+        _use_quant = quant_config is not None and quant_config.enabled
 
-        self.average_nobj = average_nobj                 # 49 is the mean number of particles per event in the toptag dataset; ADJUST FOR YOUR DATASET
-        # self.basis_dim = (16 if folklore else 15) + (11 if folklore else 10) * (len(config) - 1)
+        if _use_quant and any(c in 'SMXN' for c in config):
+            if not quant_config.allow_alpha_scaling:
+                raise NotImplementedError(
+                    f"Eq2to2 config='{config}' uses N^alpha scaling which is not "
+                    "supported for QAT. Use config='s' or set allow_alpha_scaling=True."
+                )
+
+        self.average_nobj = average_nobj
+        # basis_dim = 6 ops for first config char (skip_order_zero=False)
+        # each additional char adds 1 op (skip_order_zero=True)
         self.basis_dim = 6
+        _total_basis = 6 + max(0, len(config) - 1)  # actual runtime ops count
 
         self.alphas = nn.ParameterList([None] * len(config))
         self.dummy_alphas = torch.zeros(in_dim, device=device, dtype=dtype)
@@ -302,16 +356,39 @@ class Eq2to2(nn.Module):
             self.coefs10 = nn.Parameter(torch.normal(0, np.sqrt(1. / in_dim), (in_dim, out_dim), device=device, dtype=dtype))
             self.coefs11 = nn.Parameter(torch.normal(0, np.sqrt(1. / in_dim), (in_dim, out_dim), device=device, dtype=dtype))
         else:
-            # mixing replaces the coefs einsum; bias and diag_bias stay separate Parameters
-            # because diag_bias adds different values on and off the diagonal.
-            # _MixingLinear subclass prevents init_weights from overwriting this init.
-            self.mixing = _MixingLinear(in_dim * self.basis_dim, out_dim, bias=False,
-                                        device=device, dtype=dtype)
-            with torch.no_grad():
-                self.mixing.weight.copy_(
-                    torch.normal(0, np.sqrt(2. / (in_dim * self.basis_dim)),
-                                 (out_dim, in_dim * self.basis_dim))
-                )
+            _mixing_in = in_dim * _total_basis
+            _w_init = torch.normal(0, np.sqrt(2. / _mixing_in), (out_dim, _mixing_in))
+
+            if _use_quant:
+                if not _BREVITAS_AVAILABLE:
+                    raise ImportError('brevitas is required for quant_config.enabled=True')
+                self.post_agg_quant = _bnn.QuantIdentity(
+                    act_quant=make_act_quant(quant_config), return_quant_tensor=False)
+                self.mixing = _bnn.QuantLinear(
+                    _mixing_in, out_dim, bias=False,
+                    weight_quant=make_weight_quant(quant_config),
+                    bias_quant=None,
+                    input_quant=None,
+                    output_quant=None,
+                    return_quant_tensor=False)
+                with torch.no_grad():
+                    self.mixing.weight.copy_(_w_init)
+                # activation layer
+                if activate_lin:
+                    if activation.lower() == 'relu':
+                        self.act_layer = _bnn.QuantReLU(
+                            act_quant=make_act_quant(quant_config), return_quant_tensor=False)
+                    else:
+                        self.act_layer = nn.Sequential(
+                            get_activation_fn(activation),
+                            _bnn.QuantIdentity(act_quant=make_act_quant(quant_config), return_quant_tensor=False))
+            else:
+                # Float path: _MixingLinear subclass skips init_weights reinit
+                self.mixing = _MixingLinear(_mixing_in, out_dim, bias=False,
+                                            device=device, dtype=dtype)
+                with torch.no_grad():
+                    self.mixing.weight.copy_(_w_init)
+
         self.bias = nn.Parameter(torch.zeros(out_dim, device=device, dtype=dtype))
         self.diag_bias = nn.Parameter(torch.zeros(out_dim, device=device, dtype=dtype))
 
@@ -325,11 +402,12 @@ class Eq2to2(nn.Module):
     def forward(self, inputs, mask=None, nobj=None, softmask_ir=None, irc_weight=None):
 
         d = {'s': 'sum', 'm': 'mean', 'x': 'max', 'n': 'min'}
+        _use_quant = self.quant_config is not None and self.quant_config.enabled
 
         ops=[]
         for i, char in enumerate(self.config):
             if char.lower() in ['s', 'm', 'x', 'n']:
-                op = self.ops_func(inputs, nobj, self.average_nobj, aggregation=d[char.lower()], weight=irc_weight, skip_order_zero=False if i==0 else True, folklore = self.folklore)
+                op = self.ops_func(inputs, nobj, self.average_nobj, aggregation=d[char.lower()], weight=irc_weight, skip_order_zero=False if i==0 else True, folklore=self.folklore)
                 if char in ['S', 'M', 'X', 'N']:
                     if i==0:
                         alphas = torch.cat([self.dummy_alphas.view(1,self.in_dim,1,1,1), self.alphas[0].view(1,self.in_dim,5,1,1)], dim=2)
@@ -362,6 +440,8 @@ class Eq2to2(nn.Module):
             B, _, _, N, _ = ops.shape
             # ops: [B, in_dim, total_basis, N, N] → [B, N, N, in_dim*total_basis]
             ops_flat = ops.permute(0, 3, 4, 1, 2).reshape(B, N, N, self.in_dim * ops.shape[2])
+            if _use_quant:
+                ops_flat = self.post_agg_quant(ops_flat)
             output = self.mixing(ops_flat)  # [B, N, N, out_dim]
 
         diag_eye = torch.eye(inputs.shape[1], device=self.device, dtype=self.dtype).unsqueeze(0).unsqueeze(-1)
@@ -369,7 +449,10 @@ class Eq2to2(nn.Module):
         output = output + self.bias.view(1,1,1,-1) + diag_bias
 
         if self.activate_lin:
-            output = self.activation_fn(output)
+            if _use_quant and not self.factorize:
+                output = self.act_layer(output)
+            else:
+                output = self.activation_fn(output)
 
         if mask is not None:
             output = output * mask
@@ -390,9 +473,11 @@ class Eq2to2(nn.Module):
 class Net2to2(nn.Module):
     def __init__(self, num_channels, num_channels_m, ops_func=None, activate_agg=False, activate_lin=True,
                  activation='leakyrelu', dropout=True, drop_rate=0.25, batchnorm=None,
-                 config='s', average_nobj=49, factorize=False, masked=True, device=torch.device('cpu'), dtype=torch.float):
+                 config='s', average_nobj=49, factorize=False, masked=True,
+                 quant_config: Optional[QuantConfig] = None,
+                 device=torch.device('cpu'), dtype=torch.float):
         super(Net2to2, self).__init__()
-        
+
         self.masked = masked
         self.num_channels = num_channels
         self.num_channels_message = num_channels_m
@@ -408,8 +493,8 @@ class Net2to2(nn.Module):
         if dropout:
             self.dropout_layer = nn.Dropout(drop_rate)
 
-        self.message_layers = nn.ModuleList(([MessageNet(num_channels_m[i]+[num_channels[i],], activation=activation, batchnorm=batchnorm, masked=masked, device=device, dtype=dtype) for i in range(num_layers)]))        
-        self.eq_layers = nn.ModuleList([Eq2to2(num_channels[i], eq_out_dims[i], ops_func, activate_agg=activate_agg, activate_lin=activate_lin, activation=activation, config=config, average_nobj=average_nobj, factorize=factorize, device=device, dtype=dtype) for i in range(num_layers)])
+        self.message_layers = nn.ModuleList(([MessageNet(num_channels_m[i]+[num_channels[i],], activation=activation, batchnorm=batchnorm, masked=masked, device=device, dtype=dtype) for i in range(num_layers)]))
+        self.eq_layers = nn.ModuleList([Eq2to2(num_channels[i], eq_out_dims[i], ops_func, activate_agg=activate_agg, activate_lin=activate_lin, activation=activation, config=config, average_nobj=average_nobj, factorize=factorize, quant_config=quant_config, device=device, dtype=dtype) for i in range(num_layers)])
         self.to(device=device, dtype=dtype)
 
     def forward(self, x, mask=None, nobj=None, softmask_ir=None, irc_weight=None):
