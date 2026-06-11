@@ -19,16 +19,8 @@ Usage
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Optional, Type
-
-import brevitas.nn as qnn
-from brevitas.quant.scaled_int import (
-    Int8ActPerTensorFloat,
-    Int8WeightPerChannelFloat,
-    Int8WeightPerTensorFloat,
-)
-from brevitas.inject.enum import RestrictValueType
+from dataclasses import dataclass
+from typing import Optional
 
 
 @dataclass
@@ -45,6 +37,9 @@ class QuantConfig:
 
 def make_weight_quant(config: QuantConfig) -> type:
     """Return a Brevitas weight quantizer class matching config."""
+    from brevitas.quant.scaled_int import Int8WeightPerChannelFloat, Int8WeightPerTensorFloat
+    from brevitas.inject.enum import RestrictValueType
+
     base: type = (
         Int8WeightPerChannelFloat if config.weight_per_channel
         else Int8WeightPerTensorFloat
@@ -57,6 +52,9 @@ def make_weight_quant(config: QuantConfig) -> type:
 
 def make_act_quant(config: QuantConfig, bit_width: Optional[int] = None) -> type:
     """Return a Brevitas activation quantizer class matching config."""
+    from brevitas.quant.scaled_int import Int8ActPerTensorFloat
+    from brevitas.inject.enum import RestrictValueType
+
     bw = config.act_bit_width if bit_width is None else bit_width
     attrs: dict = {'bit_width': bw}
     if config.po2_scales:
