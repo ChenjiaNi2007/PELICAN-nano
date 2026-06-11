@@ -4,6 +4,18 @@ import pdb
 import torch
 import torch.nn as nn
 
+
+def _diag_embed(x: torch.Tensor) -> torch.Tensor:
+    """ONNX-exportable drop-in for torch.diag_embed on (..., N) inputs.
+
+    torch.diag_embed has no symbolic in the TorchScript ONNX exporter.
+    x[..., N] -> [..., N, N] with x on the main diagonal, equivalent to
+    torch.diag_embed(x) for the last dimension.
+    """
+    N = x.shape[-1]
+    eye = torch.eye(N, dtype=x.dtype, device=x.device)
+    return x.unsqueeze(-1) * eye
+
 def check_shape(x, shape):
     assert len(x.shape) == len(shape)
     for xs, s in zip(x.shape, shape):
@@ -69,10 +81,10 @@ def eops_1_to_2(inputs, nobj=None, nobj_avg=49, aggregation='mean', weight=None)
     else:
         sum_all = aggregation_fn(inputs, nobj, dim=2, keepdims=True) # B x C x 1
 
-    op1 = torch.diag_embed(inputs)
+    op1 = _diag_embed(inputs)
     op2 = inputs.unsqueeze(2).expand(-1, -1, N, -1)
     op3 = inputs.unsqueeze(3).expand(-1, -1, -1, N)
-    op4 = torch.diag_embed(sum_all.expand(-1, -1, N))
+    op4 = _diag_embed(sum_all.expand(-1, -1, N))
     op5 = sum_all.unsqueeze(3).expand(-1, -1, N, N)
     return torch.stack([op1, op2, op3, op4, op5], dim=2)
 
@@ -249,12 +261,12 @@ def eops_2_to_2(inputs, nobj=None, nobj_avg=49, aggregation='mean', weight=None,
 
     ops[1] = inputs
 
-    ops[2]  = torch.diag_embed(sum_cols)
+    ops[2]  = _diag_embed(sum_cols)
     ops[3]  = sum_cols.unsqueeze(2).expand(-1, -1, N, -1)
     ops[4]  = sum_cols.unsqueeze(3).expand(-1, -1, -1, N)
-    
+
     ops[5] = sum_all.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, N, N)
-    ops[6] = torch.diag_embed(sum_all.unsqueeze(-1).expand(-1, -1, N))
+    ops[6] = _diag_embed(sum_all.unsqueeze(-1).expand(-1, -1, N))
 
     if folklore:
         ops[16] = aggregation_fn(torch.nn.LeakyReLU()(inputs.unsqueeze(-2) + inputs.unsqueeze(-3).permute(0,1,2,4,3)), nobj, dim=-1)

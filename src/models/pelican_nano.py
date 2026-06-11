@@ -127,12 +127,12 @@ class PELICANNano(nn.Module):
 
         prediction = torch.cat([-act3, act3], axis=-1)
 
-        if torch.isnan(prediction).any():
+        if not torch.jit.is_tracing() and torch.isnan(prediction).any():
             logging.info(f"inputs: {torch.isnan(inputs).any()}")
             logging.info(f"act1: {torch.isnan(act1).any()}")
             logging.info(f"act2: {torch.isnan(act2).any()}")
             logging.info(f"prediction: {torch.isnan(prediction).any()}")
-        assert not torch.isnan(prediction).any(), "There are NaN entries in the output! Evaluation terminated."
+            assert False, "There are NaN entries in the output! Evaluation terminated."
 
         if covariance_test:
             return {'predict': prediction, 'inputs': inputs, 'act1': act1, 'act2': act2, 'act3': act3}
