@@ -77,7 +77,7 @@ def main() -> None:
         batchnorm=args.batchnorm,
         activation=args.activation,
     )
-    state = torch.load(args.checkpoint, map_location="cpu")["model_state"]
+    state = torch.load(args.checkpoint, map_location="cpu", weights_only=False)["model_state"]
     model.load_state_dict(state)
     model.eval()
 
