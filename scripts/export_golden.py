@@ -310,6 +310,16 @@ def main():
         for i in range(M):
             fp.write(f"{logits[i]:.17g}\n")
 
+    # ---- write golden_dots.dat: the input_quant OUTPUT (quantized d_ij on the 2^-10
+    # grid, spurions included), one event/line, 484 values row-major i*22+j. This drives
+    # the firmware testbench's DOTS-LEVEL mode, which injects these dots in place of the
+    # dot4 front-end to isolate the network from the float32 d_ij-cancellation caveat (D4).
+    dots_path = os.path.join(outdir, "golden_dots.dat")
+    dots_q = cap["dots"][:, :, :, 0].detach().cpu().numpy()   # [B, N, N]
+    with open(dots_path, "w") as fp:
+        for i in range(M):
+            fp.write(" ".join(f"{v:.17g}" for v in dots_q[i].reshape(-1)) + "\n")
+
     # ---- write golden_stage_dump.txt for the leading events ----
     def fmt(arr):
         a1 = np.asarray(arr).reshape(-1)
