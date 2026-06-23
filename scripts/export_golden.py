@@ -278,10 +278,20 @@ def main():
     # identity check: the UN-quantized stacked op 0 IS batch1 (post_agg_quant only rounds it)
     assert torch.allclose(ops_pre[..., 0], b1, atol=0), \
         "pre-quant basis op 0 != batch1 (identity basis broke)"
-    # and T0 (quantized basis 0) must round-trip to batch1 on the post_agg grid
+    # and T0 (quantized basis 0) must round-trip to batch1 on the post_agg grid.
+    # SATURATION-AWARE: at low bit widths batch1 legitimately exceeds the post_agg
+    # quantizer's representable range and saturates, so |T0 - batch1| can exceed one
+    # LSB there. This check is about the basis IDENTITY (op order), not magnitude, so
+    # require the round-trip only on entries WITHIN the quantizer range; saturated
+    # entries are expected to clip and must not fail it. (The firmware saturates the
+    # same way; the golden GATE downstream is the real bit-exactness test.)
     _pas = float(eq2.post_agg_quant.act_quant.scale().detach().reshape(-1)[0])
-    assert torch.max(torch.abs(Tq[..., 0] - b1)).item() <= _pas, \
-        "T0 deviates from batch1 by more than one post_agg LSB"
+    _pab = int(float(eq2.post_agg_quant.act_quant.bit_width().detach()))
+    _pamax = _pas * (2 ** (_pab - 1) - 1)        # largest representable post_agg magnitude
+    _within = b1.abs() <= _pamax
+    _dev = torch.abs(Tq[..., 0] - b1)[_within]
+    assert _dev.numel() == 0 or _dev.max().item() <= _pas, \
+        "T0 deviates from batch1 by more than one post_agg LSB (within-range entries)"
     # T4 broadcast = jmass (same scalar across i,j where unmasked); T2 col = jdotp[j]
     print("op-order verification:")
     print("  eops_2_to_2 stacked order == firmware T0..T5 (identity perm): "
