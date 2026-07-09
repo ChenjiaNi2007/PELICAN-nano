@@ -84,6 +84,7 @@ def main():
         weight_bit_width=args.weight_bit_width,
         act_bit_width=args.act_bit_width,
         input_bit_width=args.input_bit_width,
+        pmu_bit_width=args.pmu_bit_width,
         weight_per_channel=args.weight_per_channel,
         po2_scales=args.po2_scales,
         allow_alpha_scaling=args.allow_alpha_scaling,

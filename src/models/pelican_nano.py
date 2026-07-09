@@ -71,9 +71,20 @@ class PELICANNano(nn.Module):
                 act_quant=make_act_quant(quant_config),
                 return_quant_tensor=False,
             )
+            # Optional QuantIdentity on the raw 4-momenta feeding dot4, so training
+            # sees the firmware's input_t momentum grid. None = off: momenta stay
+            # float and the model is state-dict-identical to before this field.
+            if quant_config.pmu_bit_width is not None:
+                self.pmu_quant = _bnn.QuantIdentity(
+                    act_quant=make_act_quant(quant_config, quant_config.pmu_bit_width),
+                    return_quant_tensor=False,
+                )
+            else:
+                self.pmu_quant = None
         else:
             self.input_quant = None
             self.output_quant = None
+            self.pmu_quant = None
 
         # This is the main part of the network -- a sequence of permutation-equivariant 2->2 blocks
         # Each 2->2 block consists of a component-wise messaging layer that mixes channels, followed by the equivariant aggegration over particle indices
@@ -98,6 +109,10 @@ class PELICANNano(nn.Module):
         """
         # Get and prepare the data
         particle_scalars, particle_mask, edge_mask, event_momenta = self.prepare_input(data)
+        # Snap momenta to the trained grid BEFORE the dots (mirrors firmware input_t);
+        # beams are part of Pmu here, so they pass through the same quantizer.
+        if self.pmu_quant is not None:
+            event_momenta = self.pmu_quant(event_momenta)
         dot_products = dot4(event_momenta.unsqueeze(1), event_momenta.unsqueeze(2))
         inputs = dot_products.unsqueeze(-1)
 

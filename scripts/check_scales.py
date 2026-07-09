@@ -58,6 +58,8 @@ def main() -> None:
     p.add_argument("--weight-bit-width", type=int, default=24)
     p.add_argument("--act-bit-width", type=int, default=24)
     p.add_argument("--input-bit-width", type=int, default=24)
+    p.add_argument("--pmu-bit-width", type=int, default=None,
+                   help="set if trained with --pmu-bit-width (momentum quantizer)")
     p.add_argument("--no-po2", action="store_true",
                    help="set if you trained WITHOUT --po2-scales")
     p.add_argument("--batchnorm", type=str, default="b")
@@ -69,6 +71,7 @@ def main() -> None:
         weight_bit_width=args.weight_bit_width,
         act_bit_width=args.act_bit_width,
         input_bit_width=args.input_bit_width,
+        pmu_bit_width=args.pmu_bit_width,
         po2_scales=not args.no_po2,
     )
     model = PELICANNano(

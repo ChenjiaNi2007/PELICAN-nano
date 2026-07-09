@@ -29,6 +29,7 @@ class QuantConfig:
     weight_bit_width: int = 8
     act_bit_width: int = 8
     input_bit_width: int = 8       # higher default recommended for heavy-tailed inputs
+    pmu_bit_width: Optional[int] = None  # raw 4-momentum grid before dot4 (firmware input_t); None = float momenta
     bias_bit_width: Optional[int] = None  # None = float bias (fold at export)
     weight_per_channel: bool = False
     po2_scales: bool = False
