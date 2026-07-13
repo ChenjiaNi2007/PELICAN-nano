@@ -9,6 +9,15 @@
 # Full run (GPU/cluster):
 #   DATADIR=<full-dataset-dir> EPOCHS=35 DEVICE="--cuda --no-reproducible" \
 #       bash scripts/sweep_pmu_width.sh
+# Extend the sweep to extra widths without retraining the rest (keep DATADIR/
+# EPOCHS/SEED identical to the original run for comparability):
+#   PMU_WIDTHS="9 8" DATADIR=... EPOCHS=... DEVICE="--cuda --no-reproducible" \
+#       bash scripts/sweep_pmu_width.sh
+# Sub-10 caveat: watch the learned pmu scale k in the summary. The 18..10 runs
+# learned k = W-9; if that trend holds, 9 bits -> k=0 (LSB 1) and 8 bits ->
+# k=-1 (LSB 2), where the +-1 beam spurions fall OFF the momentum grid.
+# Training still sees the same grid the firmware will (that's the point of
+# Phase A*), but expect an accuracy penalty beyond the pmu-10 cliff.
 #
 # Overridable: PMU_WIDTHS, WBITS/ABITS/IBITS, DATADIR, EPOCHS, DEVICE, SEED, PY.
 set -euo pipefail
