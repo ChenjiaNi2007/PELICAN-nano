@@ -60,6 +60,10 @@ def main() -> None:
     p.add_argument("--input-bit-width", type=int, default=24)
     p.add_argument("--pmu-bit-width", type=int, default=None,
                    help="set if trained with --pmu-bit-width (momentum quantizer)")
+    p.add_argument("--pmu-block-fp", action="store_true",
+                   help="set if trained with --pmu-block-fp (Lever 7 block floating point)")
+    p.add_argument("--pmu-exp-min", type=int, default=0)
+    p.add_argument("--pmu-exp-max", type=int, default=10)
     p.add_argument("--no-po2", action="store_true",
                    help="set if you trained WITHOUT --po2-scales")
     p.add_argument("--batchnorm", type=str, default="b")
@@ -72,6 +76,9 @@ def main() -> None:
         act_bit_width=args.act_bit_width,
         input_bit_width=args.input_bit_width,
         pmu_bit_width=args.pmu_bit_width,
+        pmu_block_fp=args.pmu_block_fp,
+        pmu_exp_min=args.pmu_exp_min,
+        pmu_exp_max=args.pmu_exp_max,
         po2_scales=not args.no_po2,
     )
     model = PELICANNano(
@@ -100,8 +107,18 @@ def main() -> None:
     # so nothing is missed regardless of n_hidden or config.
     print("\nActivation / identity quantizers:")
     import brevitas.nn as qnn
+    from src.layers.blockfp import BlockFPQuant
     act_types = (qnn.QuantIdentity, qnn.QuantReLU)
     found = False
+    # Lever 7 block-FP has no learned scale (it is stateless and derives a
+    # per-particle exponent at runtime), so report its static config explicitly —
+    # the module-walk below only knows about Brevitas quantizers.
+    if isinstance(getattr(model, "pmu_quant", None), BlockFPQuant):
+        bfp = model.pmu_quant
+        print(f"  {'pmu_quant':<28} BLOCK-FP  mantissa W={bfp.bit_width} (I=2, "
+              f"LSB=2^{-(bfp.bit_width - 2)}), exp=floor(log2 E) in "
+              f"[{bfp.exp_min},{bfp.exp_max}] -> no single global scale")
+        found = True
     for name, module in model.named_modules():
         if isinstance(module, act_types):
             # act_quant.scale() is the canonical way to read an act scale

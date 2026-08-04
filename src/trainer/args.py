@@ -231,6 +231,16 @@ def setup_argparse():
     parser.add_argument('--pmu-bit-width', type=int, default=None, metavar='N',
                         help='Bit width for raw 4-momentum quantization before dot4 '
                              '(the firmware input_t grid; default: None = momenta stay float)')
+    parser.add_argument('--pmu-block-fp', action=argparse.BooleanOptionalAction, default=False,
+                        help='Make the momentum grid PER-PARTICLE block floating point '
+                             '(Lever 7): --pmu-bit-width becomes the mantissa width and '
+                             'each particle gets its own po2 exponent from its energy. '
+                             'Requires --pmu-bit-width (default: False = uniform grid)')
+    parser.add_argument('--pmu-exp-min', type=int, default=0, metavar='N',
+                        help='Lower clamp on the per-particle block-FP exponent (default: 0)')
+    parser.add_argument('--pmu-exp-max', type=int, default=10, metavar='N',
+                        help='Upper clamp on the per-particle block-FP exponent (default: 10; '
+                             '[0,10] is a 4-bit field and is free on top-tagging momenta)')
     parser.add_argument('--weight-per-channel', action=argparse.BooleanOptionalAction, default=False,
                         help='Use per-channel weight quantization (default: False)')
     parser.add_argument('--po2-scales', action=argparse.BooleanOptionalAction, default=False,

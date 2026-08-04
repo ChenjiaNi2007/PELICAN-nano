@@ -74,13 +74,22 @@ class PELICANNano(nn.Module):
             # Optional QuantIdentity on the raw 4-momenta feeding dot4, so training
             # sees the firmware's input_t momentum grid. None = off: momenta stay
             # float and the model is state-dict-identical to before this field.
-            if quant_config.pmu_bit_width is not None:
+            if quant_config.pmu_bit_width is None:
+                self.pmu_quant = None
+            elif quant_config.pmu_block_fp:
+                # Lever 7: per-particle block floating point. Stateless, so this
+                # adds no state_dict keys (see src/layers/blockfp.py).
+                from ..layers.blockfp import BlockFPQuant
+                self.pmu_quant = BlockFPQuant(
+                    quant_config.pmu_bit_width,
+                    exp_min=quant_config.pmu_exp_min,
+                    exp_max=quant_config.pmu_exp_max,
+                )
+            else:
                 self.pmu_quant = _bnn.QuantIdentity(
                     act_quant=make_act_quant(quant_config, quant_config.pmu_bit_width),
                     return_quant_tensor=False,
                 )
-            else:
-                self.pmu_quant = None
         else:
             self.input_quant = None
             self.output_quant = None

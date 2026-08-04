@@ -112,8 +112,11 @@ def build_model(args):
         weight_bit_width=args.weight_bit_width,
         act_bit_width=args.act_bit_width,
         input_bit_width=args.input_bit_width,
-        # getattr: checkpoints saved before the pmu quantizer existed lack this arg
+        # getattr: checkpoints saved before the pmu quantizer existed lack these args
         pmu_bit_width=getattr(args, 'pmu_bit_width', None),
+        pmu_block_fp=getattr(args, 'pmu_block_fp', False),
+        pmu_exp_min=getattr(args, 'pmu_exp_min', 0),
+        pmu_exp_max=getattr(args, 'pmu_exp_max', 10),
         weight_per_channel=args.weight_per_channel,
         po2_scales=args.po2_scales,
         allow_alpha_scaling=args.allow_alpha_scaling,

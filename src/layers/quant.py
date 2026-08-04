@@ -30,6 +30,12 @@ class QuantConfig:
     act_bit_width: int = 8
     input_bit_width: int = 8       # higher default recommended for heavy-tailed inputs
     pmu_bit_width: Optional[int] = None  # raw 4-momentum grid before dot4 (firmware input_t); None = float momenta
+    # Lever 7: make the momentum grid PER-PARTICLE block floating point instead of
+    # one uniform po2 grid. Needs pmu_bit_width set (it is the mantissa width).
+    # See src/layers/blockfp.py and nPELICAN-fpga/docs/RESOURCE_REDUCTION_LEVERS.md.
+    pmu_block_fp: bool = False
+    pmu_exp_min: int = 0                 # per-particle exponent clamp (4-bit field)
+    pmu_exp_max: int = 10
     bias_bit_width: Optional[int] = None  # None = float bias (fold at export)
     weight_per_channel: bool = False
     po2_scales: bool = False
