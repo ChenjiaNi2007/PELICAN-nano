@@ -84,6 +84,7 @@ def main():
         weight_bit_width=args.weight_bit_width,
         act_bit_width=args.act_bit_width,
         input_bit_width=args.input_bit_width,
+        input_unsigned=args.input_unsigned,
         pmu_bit_width=args.pmu_bit_width,
         pmu_block_fp=args.pmu_block_fp,
         pmu_exp_min=args.pmu_exp_min,

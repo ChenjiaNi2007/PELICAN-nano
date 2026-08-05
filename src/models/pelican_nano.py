@@ -63,8 +63,11 @@ class PELICANNano(nn.Module):
         # D3: QuantIdentity at the d_ij input boundary (heavy-tailed, needs learned scale)
         if _use_quant:
             from ..layers.quant import make_act_quant
+            # input_unsigned drops the sign bit: the Minkowski dot is non-negative,
+            # so the whole width goes to magnitude (free bit of dot resolution).
             self.input_quant = _bnn.QuantIdentity(
-                act_quant=make_act_quant(quant_config, quant_config.input_bit_width),
+                act_quant=make_act_quant(quant_config, quant_config.input_bit_width,
+                                         unsigned=quant_config.input_unsigned),
                 return_quant_tensor=True,
             )
             self.output_quant = _bnn.QuantIdentity(

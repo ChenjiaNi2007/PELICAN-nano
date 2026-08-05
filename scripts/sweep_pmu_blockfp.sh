@@ -48,8 +48,24 @@
 #   BASELINE=1 DATADIR=... EPOCHS=35 DEVICE="--cuda --no-reproducible" \
 #       bash scripts/sweep_pmu_blockfp.sh
 #
-# Overridable: MANTISSA_WIDTHS, EXP_MIN, EXP_MAX, WBITS/ABITS/IBITS, DATADIR,
-#              EPOCHS, DEVICE, SEED, PY, BASELINE.
+# NEXT EXPERIMENT (the dot_t bottleneck): the learned dot scale DOUBLED under
+# block-FP (8.0 -> 16.0), i.e. dot_t got coarser exactly as the momenta got finer,
+# so part of the block-FP gain is being discarded at the cast. Two knobs, both of
+# which cost zero DSP (dot_t is a RESULT width, not a multiplier operand):
+#   IUNSIGNED=1  free bit -- the Minkowski dot is non-negative (measured: 0.11% of
+#                2.28M dots come out negative, all |d| <= 2^-6 = float cancellation
+#                noise 512x below one dot_t LSB), so the sign bit encodes nothing.
+#                dot_t becomes ap_ufixed: same range, half the LSB, same hardware.
+#   IBITS=7|8    the paid version of the same resolution.
+# Run all three arms so they can be told apart -- if IUNSIGNED=1 at IBITS=6 matches
+# plain IBITS=7, adopt unsigned permanently and keep the bit for free:
+#   IUNSIGNED=1 MANTISSA_WIDTHS="12 10" BASELINE=1 ... bash scripts/sweep_pmu_blockfp.sh
+#   IBITS=7                MANTISSA_WIDTHS="12 10" BASELINE=1 ... (same)
+# BASELINE=1 matters here for a second reason: if widening dot_t helps the uniform
+# arm just as much, dot_t was always the bottleneck and the levers are independent.
+#
+# Overridable: MANTISSA_WIDTHS, EXP_MIN, EXP_MAX, WBITS/ABITS/IBITS, IUNSIGNED,
+#              DATADIR, EPOCHS, DEVICE, SEED, PY, BASELINE.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -59,6 +75,7 @@ EXP_MAX=${EXP_MAX:-10}
 WBITS=${WBITS:-6}
 ABITS=${ABITS:-6}
 IBITS=${IBITS:-6}
+IUNSIGNED=${IUNSIGNED:-0}    # 1 = unsigned d_ij grid (--input-unsigned), a free bit
 DATADIR=${DATADIR:-./data/sample_data}
 EPOCHS=${EPOCHS:-8}
 DEVICE=${DEVICE:---cpu}      # GPU: DEVICE="--cuda --no-reproducible"
@@ -75,10 +92,19 @@ COMMON=(--datadir "$DATADIR" --target is_signal
         --drop-rate 0.05 --drop-rate-out 0.05 --weight-decay 0.005
         --seed "$SEED")
 
+# The Minkowski dot is non-negative, so input_quant's sign bit encodes nothing;
+# IUNSIGNED=1 spends it on magnitude instead (dot_t becomes ap_ufixed, LSB halves at
+# the same width). Tagged into the prefix so the two arms cannot overwrite each other.
+UTAG=""
+if [[ "$IUNSIGNED" == "1" ]]; then
+    COMMON+=(--input-unsigned)
+    UTAG="u"
+fi
+
 PREFIXES=()
 
 if [[ "$BASELINE" == "1" ]]; then
-    PREFIX="fpga_model_qat_w${WBITS}a${ABITS}i${IBITS}p12"
+    PREFIX="fpga_model_qat_w${WBITS}a${ABITS}i${IBITS}${UTAG}p12"
     echo "=== training UNIFORM baseline pmu=12 -> model/${PREFIX}_best.pt ==="
     # shellcheck disable=SC2086
     $PY train_pelican_nano.py "${COMMON[@]}" \
@@ -88,7 +114,7 @@ if [[ "$BASELINE" == "1" ]]; then
 fi
 
 for MW in $MANTISSA_WIDTHS; do
-    PREFIX="fpga_model_qat_w${WBITS}a${ABITS}i${IBITS}bfp${MW}"
+    PREFIX="fpga_model_qat_w${WBITS}a${ABITS}i${IBITS}${UTAG}bfp${MW}"
     echo "=== training block-FP mantissa ${MW} (exp [${EXP_MIN},${EXP_MAX}]) -> model/${PREFIX}_best.pt ==="
     # shellcheck disable=SC2086
     $PY train_pelican_nano.py "${COMMON[@]}" \
@@ -141,6 +167,10 @@ for ENTRY in "${PREFIXES[@]}"; do
     echo "--- ${PREFIX} ---"
     BFP_FLAG=()
     [[ "$KIND" == "blockfp" ]] && BFP_FLAG=(--pmu-block-fp --pmu-exp-min "$EXP_MIN" --pmu-exp-max "$EXP_MAX")
+    # --input-unsigned must be replayed here too: Brevitas derives scale() from the
+    # stored stat over a signedness-dependent threshold, so rebuilding signed against
+    # an unsigned checkpoint reports a scale that is silently 2x off.
+    [[ "$IUNSIGNED" == "1" ]] && BFP_FLAG+=(--input-unsigned)
     $PY scripts/check_scales.py --checkpoint "$BEST" \
         --weight-bit-width "$WBITS" --act-bit-width "$ABITS" \
         --input-bit-width "$IBITS" --pmu-bit-width "$MW" "${BFP_FLAG[@]}" \

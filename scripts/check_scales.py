@@ -36,11 +36,16 @@ def po2_exponent(scale: float) -> float:
     return -math.log2(scale)
 
 
-def report_scale(name: str, scale_tensor: torch.Tensor) -> None:
-    scale = float(scale_tensor.reshape(-1)[0])  # per-tensor: one value
+def report_scale(name: str, scale_tensor: torch.Tensor, signed: bool = None) -> None:
+    scale = float(scale_tensor.detach().reshape(-1)[0])  # per-tensor: one value
     k = po2_exponent(scale)
+    # Signedness decides ap_fixed vs ap_ufixed in types_generated.h and, for
+    # input_quant, is now a training flag (--input-unsigned). Kept on the SAME line as
+    # the scale so name-based greps (e.g. sweep_pmu_blockfp.sh) carry it along.
+    sg = "" if signed is None else \
+        f"   signed={signed} -> {'ap_fixed' if signed else 'ap_ufixed'}"
     print(f"  {name:<28} scale = {scale:.6e}   ~ 2^-{k:0.2f}   "
-          f"=> {k:0.0f} fractional bits")
+          f"=> {k:0.0f} fractional bits{sg}")
 
 
 def report_weight_layer(name: str, layer) -> None:
@@ -58,6 +63,8 @@ def main() -> None:
     p.add_argument("--weight-bit-width", type=int, default=24)
     p.add_argument("--act-bit-width", type=int, default=24)
     p.add_argument("--input-bit-width", type=int, default=24)
+    p.add_argument("--input-unsigned", action="store_true",
+                   help="set if trained with --input-unsigned (unsigned d_ij grid)")
     p.add_argument("--pmu-bit-width", type=int, default=None,
                    help="set if trained with --pmu-bit-width (momentum quantizer)")
     p.add_argument("--pmu-block-fp", action="store_true",
@@ -75,6 +82,7 @@ def main() -> None:
         weight_bit_width=args.weight_bit_width,
         act_bit_width=args.act_bit_width,
         input_bit_width=args.input_bit_width,
+        input_unsigned=args.input_unsigned,
         pmu_bit_width=args.pmu_bit_width,
         pmu_block_fp=args.pmu_block_fp,
         pmu_exp_min=args.pmu_exp_min,
@@ -133,7 +141,7 @@ def main() -> None:
             if scale is None:
                 print(f"  {name:<28} (no scale — quantizer may be disabled)")
             else:
-                report_scale(name, scale)
+                report_scale(name, scale, signed=bool(module.act_quant.is_signed))
             found = True
     if not found:
         print("  (none found)")

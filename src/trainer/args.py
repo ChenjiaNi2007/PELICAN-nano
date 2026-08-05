@@ -228,6 +228,12 @@ def setup_argparse():
                         help='Bit width for activation quantization (default: 8)')
     parser.add_argument('--input-bit-width', type=int, default=8, metavar='N',
                         help='Bit width for input (d_ij) quantization (default: 8)')
+    parser.add_argument('--input-unsigned', action=argparse.BooleanOptionalAction, default=False,
+                        help='Quantize d_ij with an UNSIGNED grid (default: False). The '
+                             'Minkowski dot is non-negative, so the sign bit encodes '
+                             'nothing; dropping it doubles dot resolution at the same '
+                             'width (firmware dot_t becomes ap_ufixed). Export with the '
+                             'same flag or bit-exactness breaks.')
     parser.add_argument('--pmu-bit-width', type=int, default=None, metavar='N',
                         help='Bit width for raw 4-momentum quantization before dot4 '
                              '(the firmware input_t grid; default: None = momenta stay float)')
