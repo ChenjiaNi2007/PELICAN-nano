@@ -19,8 +19,24 @@
 #   comparison. Do that before concluding anything from a small delta.
 #
 # Read the summary as: the largest W where AUC still matches baseline is the
-# operating point; the interesting region is W = 10 down to 7. If AUC holds at
-# W<=8 the DSP48 shared-operand packing opens up (2 mults/DSP, ~506 dot DSP).
+# operating point; the interesting region is W = 10 down to 7.
+#
+# RESULT (2026-08-05, full toptag, 16 epochs, seed 42, BASELINE=1)
+# ----------------------------------------------------------------
+#   grid     W   AUC      acc      bgRej@0.5   vs uniform-12
+#   uniform  12  0.9544   0.8963   39.6        baseline
+#   blockfp  12  0.9603   0.9055   46.7        +17.9% bgRej
+#   blockfp  10  0.9573   0.9051   41.7        +5.3%
+#   blockfp   9  0.9589   0.9027   39.2        -1.0%
+#   blockfp   8  0.9527   0.8944   34.7        -12.4%
+#   blockfp   7  0.9429   0.8821   26.2        -33.8%
+#
+# Block-FP strictly beats uniform at EQUAL width -- worth 2-3 free bits (not the 4
+# the dot_t gate metric predicted). Decide on bgRej@0.5, which is monotone; AUC is
+# not (W=9 > W=10), putting the AUC noise floor at ~+-0.002 for a 16-epoch run.
+# The 8-bit DSP48 packing endgame is DEAD: it needs W=8 exactly (s>=2W+1, s+W<=27),
+# and W=8 costs 12.4% bgRej. Lever 7 is an ACCURACY lever, not a resource lever --
+# see nPELICAN-fpga/docs/RESOURCE_REDUCTION_LEVERS.md section 7g.
 #
 # Smoke test (sample_data, CPU, ~minutes):
 #   bash scripts/sweep_pmu_blockfp.sh
@@ -84,7 +100,13 @@ done
 
 echo
 echo "=== sweep summary (fill the Lever 7 table in RESOURCE_REDUCTION_LEVERS.md) ==="
-echo "baseline to beat: uniform pmu=12, AUC 0.9515"
+if [[ "$BASELINE" == "1" ]]; then
+    echo "baseline to beat: the uniform pmu=12 row below (same seed/epochs/data)"
+else
+    echo "baseline to beat: uniform pmu=12 -- re-run with BASELINE=1 for a controlled"
+    echo "  comparison. The 35-epoch production number (0.9515) is NOT comparable to a"
+    echo "  short run; see RESOURCE_REDUCTION_LEVERS.md 7g for the reference sweep."
+fi
 echo
 printf '%-38s %-9s %-4s %-8s %-8s %s\n' "checkpoint" "grid" "W" "AUC" "acc" "bgRej@0.5"
 for ENTRY in "${PREFIXES[@]}"; do
@@ -126,5 +148,6 @@ for ENTRY in "${PREFIXES[@]}"; do
 done
 
 echo
-echo "NEXT: if AUC holds at W<=8, csynth the 253 realignment shifters"
-echo "      (Lever 7e) before doing any firmware work."
+echo "NEXT: compare bgRej@0.5 (monotone) rather than AUC (noise floor ~+-0.002)."
+echo "      The reference sweep (7g) found block-FP wins at equal width but breaks"
+echo "      between W=9 and W=8, so the 8-bit DSP-packing endgame is dead."
