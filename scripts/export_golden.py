@@ -114,6 +114,7 @@ def build_model(args):
         input_bit_width=args.input_bit_width,
         # getattr: checkpoints saved before these flags existed lack them
         input_unsigned=getattr(args, 'input_unsigned', False),
+        input_clip_min=getattr(args, 'input_clip_min', None),
         pmu_bit_width=getattr(args, 'pmu_bit_width', None),
         pmu_block_fp=getattr(args, 'pmu_block_fp', False),
         pmu_exp_min=getattr(args, 'pmu_exp_min', 0),

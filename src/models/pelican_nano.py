@@ -67,7 +67,8 @@ class PELICANNano(nn.Module):
             # so the whole width goes to magnitude (free bit of dot resolution).
             self.input_quant = _bnn.QuantIdentity(
                 act_quant=make_act_quant(quant_config, quant_config.input_bit_width,
-                                         unsigned=quant_config.input_unsigned),
+                                         unsigned=quant_config.input_unsigned,
+                                         clip_min=quant_config.input_clip_min),
                 return_quant_tensor=True,
             )
             self.output_quant = _bnn.QuantIdentity(

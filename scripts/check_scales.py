@@ -63,6 +63,8 @@ def main() -> None:
     p.add_argument("--weight-bit-width", type=int, default=24)
     p.add_argument("--act-bit-width", type=int, default=24)
     p.add_argument("--input-bit-width", type=int, default=24)
+    p.add_argument("--input-clip-min", type=float, default=None,
+                   help="set if trained with --input-clip-min (d_ij clip floor)")
     p.add_argument("--input-unsigned", action="store_true",
                    help="set if trained with --input-unsigned (unsigned d_ij grid)")
     p.add_argument("--pmu-bit-width", type=int, default=None,
@@ -83,6 +85,7 @@ def main() -> None:
         act_bit_width=args.act_bit_width,
         input_bit_width=args.input_bit_width,
         input_unsigned=args.input_unsigned,
+        input_clip_min=args.input_clip_min,
         pmu_bit_width=args.pmu_bit_width,
         pmu_block_fp=args.pmu_block_fp,
         pmu_exp_min=args.pmu_exp_min,

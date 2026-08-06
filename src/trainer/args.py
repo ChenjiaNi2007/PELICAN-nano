@@ -234,6 +234,15 @@ def setup_argparse():
                              'nothing; dropping it doubles dot resolution at the same '
                              'width (firmware dot_t becomes ap_ufixed). Export with the '
                              'same flag or bit-exactness breaks.')
+    parser.add_argument('--input-clip-min', type=float, default=None, metavar='GEV2',
+                        help='Floor the d_ij saturation point at GEV2 (default: None = '
+                             'unconstrained). input_quant learns its scale over a '
+                             'Pareto-tailed input and has a measured bad basin: runs '
+                             'that converge to a clip of 128 collapse (AUC ~0.93, bgRej '
+                             '~13) while every run at clip >= 256 lands in 0.943-0.960. '
+                             'dot_t is range-limited, not resolution-limited, so this '
+                             'costs nothing. Try 256 (the cliff) or 512 (where the best '
+                             'runs sit).')
     parser.add_argument('--pmu-bit-width', type=int, default=None, metavar='N',
                         help='Bit width for raw 4-momentum quantization before dot4 '
                              '(the firmware input_t grid; default: None = momenta stay float)')

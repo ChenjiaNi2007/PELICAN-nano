@@ -48,24 +48,27 @@
 #   BASELINE=1 DATADIR=... EPOCHS=35 DEVICE="--cuda --no-reproducible" \
 #       bash scripts/sweep_pmu_blockfp.sh
 #
-# NEXT EXPERIMENT (the dot_t bottleneck): the learned dot scale DOUBLED under
-# block-FP (8.0 -> 16.0), i.e. dot_t got coarser exactly as the momenta got finer,
-# so part of the block-FP gain is being discarded at the cast. Two knobs, both of
-# which cost zero DSP (dot_t is a RESULT width, not a multiplier operand):
-#   IUNSIGNED=1  free bit -- the Minkowski dot is non-negative (measured: 0.11% of
-#                2.28M dots come out negative, all |d| <= 2^-6 = float cancellation
-#                noise 512x below one dot_t LSB), so the sign bit encodes nothing.
-#                dot_t becomes ap_ufixed: same range, half the LSB, same hardware.
-#   IBITS=7|8    the paid version of the same resolution.
-# Run all three arms so they can be told apart -- if IUNSIGNED=1 at IBITS=6 matches
-# plain IBITS=7, adopt unsigned permanently and keep the bit for free:
-#   IUNSIGNED=1 MANTISSA_WIDTHS="12 10" BASELINE=1 ... bash scripts/sweep_pmu_blockfp.sh
-#   IBITS=7                MANTISSA_WIDTHS="12 10" BASELINE=1 ... (same)
-# BASELINE=1 matters here for a second reason: if widening dot_t helps the uniform
-# arm just as much, dot_t was always the bottleneck and the levers are independent.
+# dot_t FOLLOW-UP -- RESOLVED, both knobs dead (arms B and C, 2026-08-05)
+# ----------------------------------------------------------------------
+# Hypothesis was that dot_t discarded block-FP's precision (the learned dot scale
+# doubled 8->16 under block-FP). Two more arms were run: IUNSIGNED=1 at IBITS=6
+# (the sign bit is provably dead, so this is a free bit) and plain IBITS=7 (the
+# paid version of the same resolution). Sorting all 12 runs by CLIP POINT instead
+# of by width shows the real variable:
+#
+#   clip 128 (2 runs) : AUC 0.9294 / 0.9332   bgRej 12.9 / 13.1   <- collapsed
+#   clip 256 (4 runs) : AUC 0.9429 - 0.9592   bgRej 26.2 - 42.0
+#   clip 512 (6 runs) : AUC 0.9527 - 0.9603   bgRej 34.7 - 46.7
+#
+# dot_t is RANGE-limited, not resolution-limited. Doubling resolution at fixed
+# range is a wash (i6->i7 uniform: 0.9544 -> 0.9530); halving range is catastrophic
+# at ANY width; and the best row in the whole study (blockfp-12, 0.9603 / 46.7) has
+# the COARSEST LSB and the WIDEST range. Unsigned loses because the optimizer spends
+# the freed bit on resolution and gives up range. Hence CLIP_MIN below, and hence
+# IUNSIGNED is kept only for reproducing the negative result.
 #
 # Overridable: MANTISSA_WIDTHS, EXP_MIN, EXP_MAX, WBITS/ABITS/IBITS, IUNSIGNED,
-#              DATADIR, EPOCHS, DEVICE, SEED, PY, BASELINE.
+#              CLIP_MIN, DATADIR, EPOCHS, DEVICE, SEED, PY, BASELINE.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -75,7 +78,9 @@ EXP_MAX=${EXP_MAX:-10}
 WBITS=${WBITS:-6}
 ABITS=${ABITS:-6}
 IBITS=${IBITS:-6}
-IUNSIGNED=${IUNSIGNED:-0}    # 1 = unsigned d_ij grid (--input-unsigned), a free bit
+IUNSIGNED=${IUNSIGNED:-0}    # 1 = unsigned d_ij grid (--input-unsigned); MEASURED DEAD, see 7g
+CLIP_MIN=${CLIP_MIN:-512}    # floor the d_ij clip (GeV^2); "" disables. See 7g: 2/12 runs
+                             # fell to clip 128 and collapsed; all clip>=256 runs were fine.
 DATADIR=${DATADIR:-./data/sample_data}
 EPOCHS=${EPOCHS:-8}
 DEVICE=${DEVICE:---cpu}      # GPU: DEVICE="--cuda --no-reproducible"
@@ -91,6 +96,12 @@ COMMON=(--datadir "$DATADIR" --target is_signal
         --input-bit-width "$IBITS"
         --drop-rate 0.05 --drop-rate-out 0.05 --weight-decay 0.005
         --seed "$SEED")
+
+# input_quant's scale is LEARNED over a Pareto-tailed input and has a bad basin: of the
+# 12 full-dataset runs in 7g, the two that converged to a clip of 128 collapsed (AUC
+# 0.929/0.933, bgRej 12.9/13.1) while all ten at clip >= 256 landed in 0.943-0.960.
+# dot_t is range-limited, not resolution-limited, so this floor costs nothing.
+[[ -n "$CLIP_MIN" ]] && COMMON+=(--input-clip-min "$CLIP_MIN")
 
 # The Minkowski dot is non-negative, so input_quant's sign bit encodes nothing;
 # IUNSIGNED=1 spends it on magnitude instead (dot_t becomes ap_ufixed, LSB halves at
@@ -171,6 +182,9 @@ for ENTRY in "${PREFIXES[@]}"; do
     # stored stat over a signedness-dependent threshold, so rebuilding signed against
     # an unsigned checkpoint reports a scale that is silently 2x off.
     [[ "$IUNSIGNED" == "1" ]] && BFP_FLAG+=(--input-unsigned)
+    # replay the floor too: Brevitas clamps at every forward, so omitting it here
+    # reports the unclamped scale rather than the one the model actually uses.
+    [[ -n "$CLIP_MIN" ]] && BFP_FLAG+=(--input-clip-min "$CLIP_MIN")
     $PY scripts/check_scales.py --checkpoint "$BEST" \
         --weight-bit-width "$WBITS" --act-bit-width "$ABITS" \
         --input-bit-width "$IBITS" --pmu-bit-width "$MW" "${BFP_FLAG[@]}" \

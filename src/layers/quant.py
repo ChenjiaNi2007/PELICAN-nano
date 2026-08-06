@@ -19,6 +19,7 @@ Usage
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Optional
 
@@ -40,6 +41,22 @@ class QuantConfig:
     # model_loader.py reads the signedness off the quantizer, so the emitted dot_t
     # follows automatically -- but train and export MUST agree or bit-exactness breaks.
     input_unsigned: bool = False
+    # Floor on the d_ij clip point, in GeV^2 (None = unconstrained, the historical
+    # behaviour). input_quant's scale is a LEARNED parameter over a Pareto-tailed
+    # input, and it has a bad basin: measured across 12 full-dataset runs, 2 of them
+    # converged to a clip of 128 and collapsed (AUC 0.929/0.933, bgRej 12.9/13.1)
+    # while all ten runs at clip >= 256 landed in 0.943-0.960. The dots reach 1.1e4
+    # with p99.9 = 1279, so clipping at 128 destroys the hard-pair tail that carries
+    # jet mass. dot_t is RANGE-limited, not resolution-limited -- doubling resolution
+    # at fixed range measured as a wash, so this floor costs nothing and removes the
+    # failure mode. 256 is the measured cliff; the best runs sit at 512.
+    # ⚠ NOT training-only. Brevitas stores the raw RUNTIME STAT in scaling_impl.value
+    # and applies the clamp on every forward, so the floor is part of the quantizer's
+    # definition, not a one-off training constraint. Any tool that REBUILDS the model
+    # (model_loader.py, check_scales.py, export_golden.py) must replay it or it will
+    # report a different scale than the model actually uses — the same silent failure
+    # mode as [[input_unsigned]]. Verified by test_floor_must_be_replayed_on_reload.
+    input_clip_min: Optional[float] = None
     pmu_bit_width: Optional[int] = None  # raw 4-momentum grid before dot4 (firmware input_t); None = float momenta
     # Lever 7: make the momentum grid PER-PARTICLE block floating point instead of
     # one uniform po2 grid. Needs pmu_bit_width set (it is the mantissa width).
@@ -68,14 +85,39 @@ def make_weight_quant(config: QuantConfig) -> type:
     return type('_WeightQuant', (base,), attrs)
 
 
+def clip_min_to_scaling_min(clip_min: float, bit_width: int, unsigned: bool,
+                            po2: bool) -> float:
+    """Convert a minimum CLIP POINT to Brevitas' scaling_min_val (a minimum scale).
+
+    The clip point is what actually matters physically (GeV^2, saturation of the
+    d_ij tail) and is width-independent, so that is what the CLI exposes; Brevitas
+    clamps the scale. The largest representable value is 2^(W-1)*scale signed and
+    (2^W - 1)*scale unsigned.
+
+    Under po2 the result is rounded UP to a power of two: the firmware contract
+    (ap_fixed<B, B-k> for a learned scale 2^-k) needs the scale to stay on the po2
+    grid, and rounding up can only widen the clip, never narrow it below the floor.
+    """
+    if clip_min <= 0:
+        raise ValueError(f"input_clip_min must be positive, got {clip_min}")
+    threshold = (2 ** bit_width - 1) if unsigned else 2 ** (bit_width - 1)
+    smv = clip_min / threshold
+    if po2:
+        smv = 2.0 ** math.ceil(math.log2(smv))
+    return smv
+
+
 def make_act_quant(config: QuantConfig, bit_width: Optional[int] = None,
-                   unsigned: bool = False) -> type:
+                   unsigned: bool = False, clip_min: Optional[float] = None) -> type:
     """Return a Brevitas activation quantizer class matching config.
 
     unsigned=True drops the sign bit (Uint8ActPerTensorFloat), spending the whole
     width on magnitude — a free doubling of resolution at fixed width, valid only
     where the quantized tensor is provably non-negative. Anything negative that
     does arrive clamps to 0. See QuantConfig.input_unsigned.
+
+    clip_min floors the saturation point so the learned scale cannot drift into the
+    measured bad basin. See QuantConfig.input_clip_min.
     """
     from brevitas.quant.scaled_int import Int8ActPerTensorFloat, Uint8ActPerTensorFloat
     from brevitas.inject.enum import RestrictValueType
@@ -85,4 +127,7 @@ def make_act_quant(config: QuantConfig, bit_width: Optional[int] = None,
     attrs: dict = {'bit_width': bw}
     if config.po2_scales:
         attrs['restrict_scaling_type'] = RestrictValueType.POWER_OF_TWO
+    if clip_min is not None:
+        attrs['scaling_min_val'] = clip_min_to_scaling_min(
+            clip_min, bw, unsigned, config.po2_scales)
     return type('_ActQuant', (base,), attrs)
