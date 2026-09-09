@@ -26,3 +26,7 @@ __pycache__/
 .ipynb_checkpoints
 *.sbatch~
 backup.gz
+# capacity retrain: per-jet logits (250 MB, regenerable via scripts/capacity_eval.py) and the
+# self-contained HTML report (regenerable via scripts/capacity_report.py)
+/results/capacity_retrain/logits/
+/results/capacity_retrain/report.html

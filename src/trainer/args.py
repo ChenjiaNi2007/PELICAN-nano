@@ -262,6 +262,15 @@ def setup_argparse():
                         help='Restrict quantization scales to powers of two (default: False)')
     parser.add_argument('--allow-alpha-scaling', action=argparse.BooleanOptionalAction, default=False,
                         help='Allow N^alpha config chars (S/M/X/N) under QAT (default: False)')
+    parser.add_argument('--freeze-scales-epoch', type=int, default=0, metavar='N',
+                        help='From the START of epoch N (1-based) stop updating every learned '
+                             'quantizer scale (Brevitas *.scaling_impl.value; weights keep '
+                             'training). 0 = never (default). Why: with --po2-scales a scale '
+                             'is a discrete power of two, so a late flip (e.g. the d_ij clip '
+                             '256 -> 128 GeV^2, or the momentum clip 512 -> 256 GeV) during '
+                             'the low-LR cooldown cannot be compensated by the weights and '
+                             'costs ~0.005 AUC; freezing at the cooldown start (num_epoch-2 '
+                             'for --lr-decay-type cos) lets the anneal refine weights only.')
 
     return parser
 

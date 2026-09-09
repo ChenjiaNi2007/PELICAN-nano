@@ -115,11 +115,28 @@ class Trainer:
         self.model.load_state_dict(checkpoint['model_state'])
         if self.optimizer is not None:
             self.optimizer.load_state_dict(checkpoint['optimizer_state'])
-        if self.scheduler is not None:
-            self.scheduler.load_state_dict(checkpoint['scheduler_state'])
         self.epoch = checkpoint['epoch']
         self.best_metrics = checkpoint['best_metrics']
         self.minibatch = checkpoint['minibatch']
+        if self.scheduler is not None:
+            # Do NOT scheduler.load_state_dict(): the warmup/cooldown wrappers keep their
+            # inner schedulers as attributes, so the pickled state carries a COPY of the
+            # optimizer inside them and, once loaded, the inner schedulers drive that stale
+            # copy while the live optimizer's LR never moves again. Replaying the same
+            # number of step() calls on the freshly built stack reproduces the state exactly
+            # (per-minibatch stepping: one step per minibatch seen so far).
+            n_steps = self.minibatch if self.args.lr_minibatch else self.epoch
+            for _ in range(n_steps):
+                self.scheduler.step()
+            logger.info(f'Scheduler rebuilt by replaying {n_steps} steps; lr = {self.scheduler.get_last_lr()[0]:.3e}')
+        # The per-epoch checkfile is written BEFORE that epoch's validation, so its
+        # best_metrics lag by one epoch; the bestfile carries the true best.
+        if os.path.exists(self.args.bestfile):
+            best = torch.load(self.args.bestfile, map_location=torch.device(self.device), weights_only=False)
+            if best['best_metrics']['loss'] < self.best_metrics['loss']:
+                self.best_metrics = best['best_metrics']
+                self.best_epoch = best['epoch']
+            del best
         del checkpoint
 
         logger.info(f'Loaded checkpoint at epoch {self.epoch}.\nBest metrics from checkpoint are at epoch {self.epoch}:\n{self.best_metrics}')
@@ -234,6 +251,7 @@ class Trainer:
 
             self._warm_restart(epoch)
             self._step_lr_epoch()
+            self._maybe_freeze_scales(epoch)
 
             train_predict, train_targets, epoch_t = self.train_epoch()
             train_metrics,_ = self.log_predict(train_predict, train_targets, 'train', epoch=epoch, epoch_t=epoch_t)
@@ -258,6 +276,22 @@ class Trainer:
         if self.summarize: self.writer.close()
 
         return self.best_epoch, self.best_metrics
+
+    def _maybe_freeze_scales(self, epoch):
+        """--freeze-scales-epoch N: from the start of epoch N, learned quantizer scales
+        (Brevitas ``*.scaling_impl.value``) stop receiving gradients. AdamW skips
+        parameters whose grad is None, so no weight decay is applied to them either."""
+        n = getattr(self.args, 'freeze_scales_epoch', 0) or 0
+        if n <= 0 or epoch < n or getattr(self, '_scales_frozen', False):
+            return
+        frozen = []
+        for name, param in self.model.named_parameters():
+            if 'scaling_impl' in name and param.requires_grad:
+                param.requires_grad_(False)
+                param.grad = None
+                frozen.append(name)
+        self._scales_frozen = True
+        logger.info(f'Epoch {epoch}: froze {len(frozen)} learned quantizer scale(s): {frozen}')
 
     def _get_target(self, data, stats=None):
         """
@@ -388,6 +422,7 @@ class Trainer:
             with open(metricsfile, mode='a' if (self.args.load or epoch>1) else 'w') as file_:
                 if epoch == 1:
                     file_.write(",".join(metrics.keys()))
+                    file_.write("\n")  # header line (was missing: first row got glued to it)
                 file_.write(",".join(map(str, metrics.values())))
                 file_.write("\n")  # Next line.
         if epoch < 0 and self.summarize_csv in ['test','all']:

@@ -90,8 +90,16 @@ class GradualCooldownScheduler(_LRScheduler):
     def get_lr(self):
         if (not self.started) and self.after_scheduler.last_epoch < self.cooldown_epoch:
             return self.after_scheduler.get_last_lr()
-        return [init_lr * self.gamma ** self.last_epoch for init_lr in self.init_cooldown_lr]
-        # return [init_lr * (self.lr_final/init_lr) ** (self.last_epoch/self.cooldown_length) for init_lr in self.init_cooldown_lr]
+        # Geometric decay from the LR at cooldown start to lr_final over cooldown_length
+        # scheduler steps (minibatches when --lr-minibatch, the default), held at lr_final
+        # afterwards. The previous `init_lr * 0.5 ** self.last_epoch` halved the LR every
+        # STEP, so with ~100+ minibatches per epoch the LR hit ~1e-40 within the first
+        # cooldown epoch and the remaining cooldown epochs trained nothing (identical
+        # metrics epoch after epoch in every log/*.log written before this fix).
+        t = min(self.last_epoch, self.cooldown_length)
+        return [init_lr * (self.lr_final / init_lr) ** (t / self.cooldown_length)
+                if init_lr > self.lr_final else self.lr_final
+                for init_lr in self.init_cooldown_lr]
 
     def step(self, epoch=None, metrics=None):
         if self.last_epoch == -1:
