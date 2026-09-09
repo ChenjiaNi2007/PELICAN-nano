@@ -195,6 +195,24 @@ def main():
     model.load_state_dict(sd, strict=True)
     model.eval()
 
+    if not getattr(a, "quant", False):
+        # Pure FLOAT checkpoint (no Brevitas quantizers; e.g. the 2026-09 retrained
+        # cap_*_float_* models). The golden gate only needs momenta / counts / logits;
+        # the quantizer scale report and the per-stage dump below assume quant modules,
+        # so they are skipped. Same file formats as the quant path.
+        with torch.no_grad():
+            logits = model(calib)["predict"][:, 1].detach().cpu().double().numpy()
+        for name, rows in (("golden_pmu.dat", (" ".join(f"{v:.18e}" for v in pmu[i].reshape(-1)) for i in range(M))),
+                           ("golden_nobj.dat", (f"{int(nobj_raw[i])}" for i in range(M))),
+                           ("golden_logits.dat", (f"{logits[i]:.17g}" for i in range(M)))):
+            path = os.path.join(outdir, name)
+            with open(path, "w") as fp:
+                fp.write("\n".join(rows) + "\n")
+            print("wrote:", path)
+        print(f"float checkpoint (no quantizers): {M} events exported; scale report and "
+              f"stage dump skipped")
+        return
+
     # ---- gather + report every quantizer scale / signedness / bit width ----
     scale_lines = []
     scale_lines.append("# quantizer scales (scale = 2^-k), signedness, bit widths")
