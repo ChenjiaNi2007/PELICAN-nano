@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from .masked_batchnorm import MaskedBatchNorm1d, MaskedBatchNorm2d
+from .masked_batchnorm import MaskedBatchNorm1d, MaskedBatchNorm2d, MaskedOffset2d
 from .masked_instancenorm import MaskedInstanceNorm2d, MaskedInstanceNorm3d
 class BasicMLP(nn.Module):
     """
@@ -111,6 +111,9 @@ class MessageNet(nn.Module):
                     self.normlayer = MaskedInstanceNorm3d(1, device=device, dtype=dtype)
                 else:
                     self.normlayer = nn.InstanceNorm3d(1, device=device, dtype=dtype)
+            elif self.batchnorm.startswith('a'):
+                # Offset-only (additive) norm: see MaskedOffset2d docstring.
+                self.normlayer = MaskedOffset2d(num_channels[-1], device=device, dtype=dtype)
             else:
                 self.batchnorm = False
 
@@ -139,6 +142,10 @@ class MessageNet(nn.Module):
                         x = self.normlayer(x, mask)
                     else:
                         x = self.normlayer(x.permute(0,3,1,2)).permute(0,2,3,1)
+            elif self.batchnorm.startswith('a'):
+                # Elementwise offset on the channel axis: no reshaping needed for
+                # either the 3-D or 4-D case; mask only on the masked path.
+                x = self.normlayer(x, mask if self.masked else None)
             elif self.batchnorm.startswith('l'):
                 if len(x.shape)==3:
                     if self.masked:

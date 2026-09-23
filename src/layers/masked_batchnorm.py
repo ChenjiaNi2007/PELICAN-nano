@@ -245,3 +245,44 @@ class MaskedBatchNorm3d(nn.BatchNorm3d):
         inp = torch.where(mask_bool, inp, self.zero)
 
         return inp
+
+
+class MaskedOffset2d(nn.Module):
+    """
+    Offset-only replacement for MaskedBatchNorm2d (selected by ``--batchnorm a``).
+
+    Computes ``out = inp + bias`` (bias broadcast over the last, channel, axis) and
+    then zeroes the masked (padded) entries exactly like MaskedBatchNorm2d. It has a
+    single learnable parameter ``bias`` of shape [num_features]: no running
+    statistics, no multiplicative scale. Its only state-dict key is ``bias``
+    (``normlayer.bias`` in the model); the firmware loader detects that key and
+    treats the layer as BatchNorm with mean=0, scale=1.
+
+    Why it exists: at inference a trained BatchNorm is a fixed affine map
+    ``s*x + beta'``. The multiplicative ``s`` is absorbed by the learned
+    power-of-two scales of the adjacent quantizers (measured: snapping ``s`` to the
+    nearest power of two changes test AUC by 0.0001), so only the additive offset
+    carries information. Training with an offset-only layer lets the firmware drop
+    the BN1 multipliers entirely, while keeping the N-dependent bias term (the
+    offset summed over the active entries) -- which is why the offset cannot simply
+    be folded into downstream biases.
+
+    inp:  tensor whose last dimension is the channel dim, e.g. [B, N, N, C].
+    mask: bool tensor broadcastable with inp (e.g. [B, N, N, 1]), or None for no
+          masking (the ``masked=False`` path).
+    """
+    def __init__(self, num_features, device=None, dtype=None):
+        super().__init__()
+        self.num_features = num_features
+        self.bias = nn.Parameter(torch.zeros(num_features, device=device, dtype=dtype))
+        # Non-persistent so the state dict holds ``bias`` only.
+        self.register_buffer('zero', torch.tensor(0, device=device, dtype=dtype), persistent=False)
+
+    def forward(self, inp, mask=None):
+        out = inp + self.bias
+        if mask is not None:
+            out = torch.where(mask.bool(), out, self.zero)
+        return out
+
+    def extra_repr(self):
+        return f'{self.num_features}'
