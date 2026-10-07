@@ -136,7 +136,7 @@ def drop_zeros(props, to_keep):
         return props[:, to_keep, ...]
 
 
-def collate_fn(data, scale=1., nobj=None, edge_features=[], add_beams=False, beam_mass=1, read_pid=False):
+def collate_fn(data, scale=1., nobj=None, edge_features=[], add_beams=False, beam_mass=1, read_pid=False, add_jet=False):
     """
     Collation function that collates datapoints into the batch format for lgn
 
@@ -148,13 +148,25 @@ def collate_fn(data, scale=1., nobj=None, edge_features=[], add_beams=False, bea
         Keys of properties that correspond to edge features, and therefore are
         matrices of shapes (num_particles, num_particles), which when forming a batch
         need to be padded along the first two axes instead of just the first one.
+    add_jet : bool
+        Insert the FULL-jet 4-momentum (per-event key ``Pjet`` (4,), the sum over ALL
+        constituents before truncation) as one extra spurion at slot 2, right after the
+        two beams and before the constituents, scaled by ``scale`` like the constituents.
+        Requires ``add_beams=True``. ``Nobj`` grows by 3 in total; ``Pjet`` stays in the
+        batch as a (B, 4) tensor.
 
     Returns
     -------
     batch : dict of Pytorch tensors
         The collated data.
     """
-    data = {prop: batch_stack([mol[prop] for mol in data], nobj=nobj) for prop in data[0].keys()}
+    if add_jet and not add_beams:
+        raise ValueError('add_jet=True requires add_beams=True (slot layout is beams, jet, constituents)')
+    if add_jet and 'Pjet' not in data[0]:
+        raise KeyError("add_jet=True needs the per-event key 'Pjet' (full-jet 4-momentum); "
+                       "rebuild the dataset with the updated scripts/make_hls4ml5.py")
+    # Pjet is a per-event 4-vector, not a particle list: never truncate it to nobj.
+    data = {prop: batch_stack([mol[prop] for mol in data], nobj=(None if prop == 'Pjet' else nobj)) for prop in data[0].keys()}
     device = data['Pmu'].device
     dtype = data['Pmu'].dtype
     zero = torch.tensor(0.)
@@ -175,15 +187,22 @@ def collate_fn(data, scale=1., nobj=None, edge_features=[], add_beams=False, bea
     if add_beams:
         p = 1
         beams = torch.tensor([[[sqrt(p**2+beam_mass**2),0,0,p], [sqrt(p**2+beam_mass**2),0,0,-p]]], dtype=data['Pmu'].dtype, device=data['Pmu'].device).expand(s[0], 2, 4)
-        data['Pmu'] = torch.cat([beams, data['Pmu'] * scale], dim=1)
-        data['Nobj'] = data['Nobj'] + 2
+        # Spurions in front of the constituents: 2 beams, then (add_jet) the full-jet 4-vector.
+        spurions = [beams]
+        if add_jet:
+            pjet = data['Pjet'].to(dtype=data['Pmu'].dtype, device=data['Pmu'].device).reshape(s[0], 1, 4)
+            spurions.append(pjet * scale)
+        n_spur = 3 if add_jet else 2  # rows prepended before the constituents
+        data['Pmu'] = torch.cat(spurions + [data['Pmu'] * scale], dim=1)
+        data['Nobj'] = data['Nobj'] + n_spur
         if read_pid:
             num_classes=14
-            beams_pdg = torch.tensor([[2212, 2212]], dtype=torch.long, device=data['Pmu'].device).expand(s[0], 2)
+            # the jet spurion gets the beam placeholder pdg (2212) so pdg_onehot keeps working
+            beams_pdg = torch.full((s[0], n_spur), 2212, dtype=torch.long, device=data['Pmu'].device)
             data['pdgid'] = torch.cat([beams_pdg, data['pdgid'].to(dtype=torch.long)], dim=1)
         else:
             num_classes=2
-            data['pdgid'] = torch.cat([2212 * torch.ones(s[0], 2, dtype=torch.long, device=data['Pmu'].device),
+            data['pdgid'] = torch.cat([2212 * torch.ones(s[0], n_spur, dtype=torch.long, device=data['Pmu'].device),
                                        torch.zeros(s[0], s[1], dtype=torch.long, device=data['Pmu'].device)], dim=1)
     else:
         data['Pmu'] = data['Pmu'] * scale

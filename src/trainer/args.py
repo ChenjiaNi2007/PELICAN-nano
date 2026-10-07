@@ -150,6 +150,10 @@ def setup_argparse():
                         help='Number of test samples to use. Set to -1 to use entire dataset. (default: -1)')
     parser.add_argument('--add-beams', action=argparse.BooleanOptionalAction, default=True,
                         help='Append two proton beams of the form (m^2,0,0,+-1) to each event and add one-hot labels for them')
+    parser.add_argument('--add-jet', action=argparse.BooleanOptionalAction, default=False,
+                        help="Append the FULL-jet 4-momentum (dataset key Pjet, sum over all constituents) as a third "
+                             "spurion at slot 2, after the two beams. Gives the model the full jet mass and each "
+                             "constituent's share of the jet (p_i.p_jet), which the leading-N truncation otherwise discards.")
     parser.add_argument('--beam-mass', type=float, default=0., metavar='N',
                     help='Set mass m of the beams, so that E=sqrt(1 + m^2) (default = 1)')
     parser.add_argument('--force-download', action=argparse.BooleanOptionalAction, default=False,
@@ -178,6 +182,14 @@ def setup_argparse():
     parser.add_argument('--n-hidden', default = 1, type=int, metavar='N',
                         help="""Number of channels in the hidden layer (between Eq2to2 and Eq2to0)"""
                         )
+    parser.add_argument('--n-out', default=1, type=int, metavar='N',
+                        help="Number of output logits. 1 = binary single-logit head emitting cat([-w, w]) "
+                             "(default, unchanged behaviour); K > 1 = K-class softmax head -- use with "
+                             "--target label on a dataset whose 'label' key holds class indices 0..K-1")
+    parser.add_argument('--head-hidden', default=0, type=int, metavar='K',
+                        help="Width of a hidden ReLU layer between the 2->0 aggregation and the output logits "
+                             "(0 = none, today's single linear). Lets the pooled invariants be combined nonlinearly, "
+                             "e.g. mass windows for W vs Z; a few hundred MACs on scalars, negligible in firmware.")
 
     parser.add_argument('--dropout', action=argparse.BooleanOptionalAction, default=True,
                     help='Enable a dropout layer at the end of the network (default = False)')
@@ -256,12 +268,64 @@ def setup_argparse():
     parser.add_argument('--pmu-exp-max', type=int, default=10, metavar='N',
                         help='Upper clamp on the per-particle block-FP exponent (default: 10; '
                              '[0,10] is a 4-bit field and is free on top-tagging momenta)')
+    parser.add_argument('--pmu-static-exp', action=argparse.BooleanOptionalAction, default=False,
+                        help='SPS: replace the runtime per-particle block-FP exponent with a '
+                             'LEARNED static integer exponent per particle SLOT (position in '
+                             'the input incl. the 2 beams), clamped to [--pmu-exp-min, '
+                             '--pmu-exp-max]. Zero hardware cost vs the uniform grid (the '
+                             'realignment is wiring). Requires --pmu-block-fp, --pmu-bit-width '
+                             'and --nobj (slots = nobj + 2 with --add-beams). (default: False)')
+    parser.add_argument('--pmu-exp-floor-batches', type=int, default=0, metavar='K',
+                        help='SPS only: over the first K training batches floor each slot\'s '
+                             'static exponent at the running max of ceil(log2 max|E|)-1 '
+                             '(clip 2^(e+1) covers every particle seen), so soft slots cannot '
+                             'learn a saturating clip -- the analogue of --input-clip-min. '
+                             '(default: 0 = off, pure learned exponent)')
+    parser.add_argument('--pmu-exp-fixed', action=argparse.BooleanOptionalAction, default=False,
+                        help='SPS diagnostic: do not learn the static exponents; hold them at '
+                             'the data-derived value (first-batch init, or the floor table with '
+                             '--pmu-exp-floor-batches K). Requires --pmu-static-exp. (default: False)')
+    parser.add_argument('--jet-quant-split', action=argparse.BooleanOptionalAction, default=False,
+                        help='With --add-jet, quantize the three d_ij populations with SEPARATE '
+                             'learned scales: particle-particle dots (median ~1 GeV^2), dots '
+                             'with the jet spurion d[2,j]/d[i,2] (median ~200, max ~2e4) and '
+                             'm_jet^2 = d[2,2] (median ~7e3, max ~1.6e5); plus a separate '
+                             'momentum quantizer for the jet row with --pmu-bit-width. One '
+                             'per-tensor scale is set by the jet dots and rounds the pair dots '
+                             'to 0 at 6 bits (72%% float -> 53.5%% QAT). Requires --quant and '
+                             '--add-jet; not supported with --pmu-block-fp. (default: False)')
+    parser.add_argument('--jet-input-bit-width', type=int, default=None, metavar='N',
+                        help='--jet-quant-split only: bit width of input_quant_jet (d[2,j], '
+                             'd[i,2]; default: None = --input-bit-width). One row per jet, so '
+                             'a wide grid is free in hardware. Recommended: 10.')
+    parser.add_argument('--mjet-input-bit-width', type=int, default=None, metavar='N',
+                        help='--jet-quant-split only: bit width of input_quant_mjet (m_jet^2 '
+                             '= d[2,2]; default: None = --input-bit-width). At 6 bits on m^2 '
+                             '(median 7300, max 1.6e5 GeV^2) the LSB is ~1000 GeV^2 vs a '
+                             '~1800 GeV^2 W/Z mass^2 gap. One scalar per jet. Recommended: 16.')
+    parser.add_argument('--jet-pmu-bit-width', type=int, default=None, metavar='N',
+                        help='--jet-quant-split only: bit width of pmu_quant_jet (the jet '
+                             'momentum row; default: None = --pmu-bit-width, which it '
+                             'requires). A 12-bit grid (LSB 2 GeV on a 5 TeV vector) puts '
+                             '~2*E*dE ~ 1e4 GeV^2 of error into m^2 = E^2 - p^2. One row per '
+                             'jet. Recommended: 20.')
     parser.add_argument('--weight-per-channel', action=argparse.BooleanOptionalAction, default=False,
                         help='Use per-channel weight quantization (default: False)')
     parser.add_argument('--po2-scales', action=argparse.BooleanOptionalAction, default=False,
                         help='Restrict quantization scales to powers of two (default: False)')
     parser.add_argument('--allow-alpha-scaling', action=argparse.BooleanOptionalAction, default=False,
                         help='Allow N^alpha config chars (S/M/X/N) under QAT (default: False)')
+    parser.add_argument('--init-from', type=str, default=None, metavar='PATH',
+                        help='Weights-only warm start from checkpoint PATH (its model_state): '
+                             'every key present in this model with a matching shape is copied '
+                             'after a Brevitas materialization forward; the rest (e.g. SPS '
+                             'pmu_quant state) stays fresh. Optimizer/scheduler/epoch start '
+                             'fresh. Independent of --load. (default: None)')
+    parser.add_argument('--pmu-exp-freeze-epoch', type=int, default=0, metavar='N',
+                        help='SPS only: from the START of epoch N (1-based) freeze ONLY the '
+                             'static per-slot exponents (pmu_quant.log2_exp); other quantizer '
+                             'scales keep training until --freeze-scales-epoch. N=1 freezes them '
+                             'at the first-batch data init. 0 = never (default).')
     parser.add_argument('--freeze-scales-epoch', type=int, default=0, metavar='N',
                         help='From the START of epoch N (1-based) stop updating every learned '
                              'quantizer scale (Brevitas *.scaling_impl.value; weights keep '
@@ -273,6 +337,23 @@ def setup_argparse():
                              'for --lr-decay-type cos) lets the anneal refine weights only.')
 
     return parser
+
+
+def validate_jet_quant_split(args):
+    """Trainer-level guards for --jet-quant-split (the model cannot see add_jet: it
+    assumes slot 2 is the jet spurion, so the flag is only meaningful with --add-jet)."""
+    if not getattr(args, 'jet_quant_split', False):
+        for _f in ('jet_input_bit_width', 'mjet_input_bit_width', 'jet_pmu_bit_width'):
+            if getattr(args, _f, None) is not None:
+                raise ValueError(f"--{_f.replace('_', '-')} requires --jet-quant-split")
+        return
+    if (getattr(args, 'jet_pmu_bit_width', None) is not None
+            and getattr(args, 'pmu_bit_width', None) is None):
+        raise ValueError('--jet-pmu-bit-width requires --pmu-bit-width')
+    if not getattr(args, 'quant', False):
+        raise ValueError('--jet-quant-split requires --quant (it splits the QAT input quantizers)')
+    if not getattr(args, 'add_jet', False):
+        raise ValueError('--jet-quant-split requires --add-jet (slot 2 must be the full-jet spurion)')
 
 
 # From https://stackoverflow.com/questions/12116685/how-can-i-require-my-python-scripts-argument-to-be-a-float-between-0-0-1-0-usin

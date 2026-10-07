@@ -49,6 +49,8 @@ the intended path to `brevitas.nn.QuantLinear`.
 (trace). Mixed by `coefs [C_hidden, C_out, 2]` (`einsum('dsb,ndb->ns')` — same Linear
 equivalence with `[C_hidden*2]` input) plus one bias per output channel. `C_out = 1`; the
 model emits `prediction = cat([-w, w])` and tags top if w > 0.
+With `n_out=K>1` (`--n-out K --target label`) it instead emits K raw logits `(B, K)`
+(hls4ml 5-class g/q/W/Z/t task) — see `docs/HLS4ML_5CLASS.md`.
 
 **Parameter count check** (use as a regression test): with one output channel and no
 BatchNorm, params = 6·C_h (coefs) + C_h (bias) + C_h (diag_bias) + 2·C_h (2→0 coefs) + 1

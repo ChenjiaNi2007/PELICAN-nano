@@ -73,11 +73,49 @@ def main() -> None:
                    help="set if trained with --pmu-block-fp (Lever 7 block floating point)")
     p.add_argument("--pmu-exp-min", type=int, default=0)
     p.add_argument("--pmu-exp-max", type=int, default=10)
+    p.add_argument("--pmu-static-exp", action="store_true",
+                   help="set if trained with --pmu-static-exp (SPS static per-slot exponent)")
+    p.add_argument("--pmu-exp-floor-batches", type=int, default=None,
+                   help="trained --pmu-exp-floor-batches K (SPS exponent floor); default: "
+                        "replayed from the checkpoint's saved args (0 if absent)")
+    p.add_argument("--pmu-exp-fixed", action=argparse.BooleanOptionalAction, default=None,
+                   help="trained with --pmu-exp-fixed; default: replayed from checkpoint args")
+    p.add_argument("--nobj", type=int, default=20,
+                   help="trained --nobj (SPS slot count = nobj + 2 beams); default 20")
+    p.add_argument("--add-beams", action=argparse.BooleanOptionalAction, default=True,
+                   help="trained with beams (default True, as the trainer)")
+    # Model-shaping flags of the hls4ml-5-class runs. Default None = replay from the
+    # checkpoint's saved args (head checkpoints otherwise fail with "Unexpected key(s)
+    # head.weight"; a --jet-quant-split checkpoint has extra input_quant_jet/mjet keys).
+    p.add_argument("--n-out", type=int, default=None,
+                   help="trained --n-out (default: replayed from checkpoint args, else 1)")
+    p.add_argument("--head-hidden", type=int, default=None,
+                   help="trained --head-hidden (default: replayed from checkpoint args, else 0)")
+    p.add_argument("--add-jet", action=argparse.BooleanOptionalAction, default=None,
+                   help="trained with --add-jet (default: replayed from checkpoint args)")
+    p.add_argument("--jet-quant-split", action=argparse.BooleanOptionalAction, default=None,
+                   help="trained with --jet-quant-split (default: replayed from checkpoint args)")
+    for _flag in ("--jet-input-bit-width", "--mjet-input-bit-width", "--jet-pmu-bit-width"):
+        p.add_argument(_flag, type=int, default=None,
+                       help=f"trained {_flag} (default: replayed from checkpoint args, else None)")
     p.add_argument("--no-po2", action="store_true",
                    help="set if you trained WITHOUT --po2-scales")
     p.add_argument("--batchnorm", type=str, default="b")
     p.add_argument("--activation", type=str, default="relu")
     args = p.parse_args()
+    ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+    if args.pmu_exp_floor_batches is None:
+        # replay from the checkpoint (rebuild-trap rule); older ckpts lack it -> 0
+        args.pmu_exp_floor_batches = int(getattr(ckpt.get("args"), "pmu_exp_floor_batches", 0) or 0)
+    _ck = ckpt.get("args")
+    for _name, _dflt in (("n_out", 1), ("head_hidden", 0), ("add_jet", False),
+                         ("jet_quant_split", False), ("jet_input_bit_width", None),
+                         ("mjet_input_bit_width", None), ("jet_pmu_bit_width", None)):
+        if getattr(args, _name) is None:
+            setattr(args, _name, getattr(_ck, _name, _dflt) if _ck is not None else _dflt)
+    if args.pmu_exp_fixed is None:
+        args.pmu_exp_fixed = bool(getattr(ckpt.get("args"), "pmu_exp_fixed", False)) \
+            and args.pmu_static_exp
 
     qcfg = QuantConfig(
         enabled=True,
@@ -90,6 +128,14 @@ def main() -> None:
         pmu_block_fp=args.pmu_block_fp,
         pmu_exp_min=args.pmu_exp_min,
         pmu_exp_max=args.pmu_exp_max,
+        pmu_static_exp=args.pmu_static_exp,
+        pmu_exp_floor_batches=args.pmu_exp_floor_batches,
+        pmu_exp_fixed=args.pmu_exp_fixed,
+        pmu_n_slots=args.nobj + (2 if args.add_beams else 0) + (1 if args.add_jet else 0),
+        jet_quant_split=bool(args.jet_quant_split),
+        jet_input_bit_width=getattr(args, 'jet_input_bit_width', None),
+        mjet_input_bit_width=getattr(args, 'mjet_input_bit_width', None),
+        jet_pmu_bit_width=getattr(args, 'jet_pmu_bit_width', None),
         po2_scales=not args.no_po2,
     )
     model = PELICANNano(
@@ -97,8 +143,16 @@ def main() -> None:
         quant_config=qcfg,
         batchnorm=args.batchnorm,
         activation=args.activation,
+        n_out=int(args.n_out),
+        head_hidden=int(args.head_hidden),
     )
-    state = torch.load(args.checkpoint, map_location="cpu", weights_only=False)["model_state"]
+    state = ckpt["model_state"]
+    if ("pmu_quant.log2_exp" in state) != bool(args.pmu_static_exp):
+        sys.exit("check_scales: checkpoint "
+                 + ("HAS" if "pmu_quant.log2_exp" in state else "has NO")
+                 + " SPS static exponents (pmu_quant.log2_exp) but --pmu-static-exp was "
+                 + ("not " if not args.pmu_static_exp else "") + "given -- replay the "
+                 "training flags (--pmu-block-fp --pmu-static-exp --nobj ...)")
     model.load_state_dict(state)
     model.eval()
 
@@ -124,7 +178,24 @@ def main() -> None:
     # Lever 7 block-FP has no learned scale (it is stateless and derives a
     # per-particle exponent at runtime), so report its static config explicitly —
     # the module-walk below only knows about Brevitas quantizers.
-    if isinstance(getattr(model, "pmu_quant", None), BlockFPQuant):
+    if isinstance(getattr(model, "pmu_quant", None), BlockFPQuant) and model.pmu_quant.static:
+        # SPS: one learned integer exponent per particle slot (beams = slots 0,1).
+        bfp = model.pmu_quant
+        tbl = [int(v) for v in bfp.exponent_table()]
+        fx = "FIXED (data-derived) " if bfp.fixed else ""
+        print(f"  {'pmu_quant':<28} STATIC {fx}block-FP W={bfp.bit_width} (I=2, "
+              f"LSB=2^{-(bfp.bit_width - 2)}) exp[i] = {tbl} "
+              f"-> clip 2^(e+1) GeV per slot")
+        print(f"  {'pmu_quant clip GeV':<28} {[2 ** (e + 1) for e in tbl]}")
+        fz = int(getattr(ckpt.get("args"), "pmu_exp_freeze_epoch", 0) or 0)
+        if fz > 0:
+            print(f"  {'pmu_quant exp frozen':<28} exp frozen from epoch {fz}")
+        if bfp.floor_batches > 0:
+            flo = [int(v) for v in bfp.exp_floor.tolist()]
+            print(f"  {'pmu_quant exp floor':<28} {flo}   (K={bfp.floor_batches}, "
+                  f"batches seen={int(bfp.floor_batches_seen)})")
+        found = True
+    elif isinstance(getattr(model, "pmu_quant", None), BlockFPQuant):
         bfp = model.pmu_quant
         print(f"  {'pmu_quant':<28} BLOCK-FP  mantissa W={bfp.bit_width} (I=2, "
               f"LSB=2^{-(bfp.bit_width - 2)}), exp=floor(log2 E) in "

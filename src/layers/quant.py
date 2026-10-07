@@ -64,10 +64,63 @@ class QuantConfig:
     pmu_block_fp: bool = False
     pmu_exp_min: int = 0                 # per-particle exponent clamp (4-bit field)
     pmu_exp_max: int = 10
+    # SPS ("static per-slot" exponent): same block-FP representation, but the
+    # exponent is a TRAINED integer per particle SLOT (position in the pT-ordered
+    # input, beams at slots 0,1) instead of floor(log2 E) computed at runtime. The
+    # firmware realignment then becomes a compile-time constant shift (wiring).
+    # Needs pmu_block_fp=True and pmu_bit_width. pmu_n_slots is the particle-axis
+    # length INCLUDING the beams (nobj + 2); it is not a CLI flag -- every tool
+    # derives it from the checkpoint's nobj/add_beams.
+    pmu_static_exp: bool = False
+    pmu_n_slots: int = 22
+    # SPS clip floor (analogue of input_clip_min): over the first K training batches
+    # the per-slot exponent is floored at the running max of ceil(log2 max|E|) - 1,
+    # so a soft slot cannot learn a clip that saturates what those batches needed.
+    # 0 = off (pure learned exponent). Model-shaping: tools must replay it.
+    pmu_exp_floor_batches: int = 0
+    # SPS diagnostic: hold the exponent at its data-derived value (first-batch init,
+    # or the floor table when pmu_exp_floor_batches > 0) instead of learning it.
+    pmu_exp_fixed: bool = False
+    # --jet-quant-split (needs add_jet batches: slot 2 = full-jet spurion). With the
+    # jet spurion, d_ij mixes three populations: particle-particle dots (median 1 GeV^2,
+    # p99 270), jet-involving dots p_i.p_jet (median 222, p99 3200, max 2.2e4) and
+    # m_jet^2 = d[2,2] (median 7300, max 1.6e5). ONE per-tensor input_quant scale is set
+    # by the jet dots and crushes the pair dots to 0 at 6 bits (measured: 72% float ->
+    # 53.5% QAT). True adds input_quant_jet (d[2,j], d[i,2], i,j != 2),
+    # input_quant_mjet (d[2,2]) and, with a uniform pmu grid, pmu_quant_jet (row 2 of
+    # Pmu). Model-shaping (new state-dict keys): tools that rebuild must replay it.
+    jet_quant_split: bool = False
+    # Independent widths for the three jet quantizers (None = inherit). These are ONE
+    # row and ONE scalar per jet, so wider grids cost nothing in hardware. Measured at
+    # 6 bits: input_quant_mjet's LSB on m_jet^2 is ~1000 GeV^2 vs a ~1800 GeV^2 W/Z
+    # mass^2 gap; a 12-bit jet momentum grid (LSB 2 GeV on a 5 TeV vector) puts
+    # ~2*E*dE ~ 1e4 GeV^2 of error into m^2 = E^2 - p^2. Recommended 10 / 16 / 20.
+    jet_input_bit_width: Optional[int] = None   # input_quant_jet; None = input_bit_width
+    mjet_input_bit_width: Optional[int] = None  # input_quant_mjet; None = input_bit_width
+    jet_pmu_bit_width: Optional[int] = None     # pmu_quant_jet; None = pmu_bit_width
     bias_bit_width: Optional[int] = None  # None = float bias (fold at export)
     weight_per_channel: bool = False
     po2_scales: bool = False
     allow_alpha_scaling: bool = False
+
+    def __post_init__(self):
+        if self.pmu_static_exp:
+            if not self.pmu_block_fp:
+                raise ValueError("pmu_static_exp requires pmu_block_fp=True")
+            if self.pmu_bit_width is None:
+                raise ValueError("pmu_static_exp requires pmu_bit_width (the mantissa width)")
+            if self.pmu_n_slots is None or int(self.pmu_n_slots) < 1:
+                raise ValueError(f"pmu_static_exp needs pmu_n_slots >= 1, got {self.pmu_n_slots}")
+        if self.pmu_exp_fixed and not self.pmu_static_exp:
+            raise ValueError("pmu_exp_fixed requires pmu_static_exp=True")
+        if self.pmu_exp_floor_batches and self.pmu_exp_floor_batches < 0:
+            raise ValueError("pmu_exp_floor_batches must be >= 0")
+        for _f in ('jet_input_bit_width', 'mjet_input_bit_width', 'jet_pmu_bit_width'):
+            if getattr(self, _f) is not None and not self.jet_quant_split:
+                raise ValueError(f"{_f} requires jet_quant_split=True")
+        if self.jet_pmu_bit_width is not None and self.pmu_bit_width is None:
+            raise ValueError("jet_pmu_bit_width requires pmu_bit_width (pmu_quant_jet only "
+                             "exists when the constituent momenta are quantized)")
 
 
 def make_weight_quant(config: QuantConfig) -> type:

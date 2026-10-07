@@ -137,8 +137,19 @@ def logging_printout(args, trial=None):
 
 def init_optimizer(args, model, step_per_epoch=None):
 
-    params = {'params': model.parameters(), 'lr': args.lr_init, 'weight_decay': args.weight_decay}
-    params = [params]
+    # SPS static block-FP exponents (*.pmu_quant.log2_exp) are learned quantizer
+    # scales, not weights: weight decay would pull them toward 2^0. Give them their
+    # own group with weight_decay=0 (same lr). Without such params this is the
+    # original single group, so every existing run is unchanged.
+    exp_params = [p for n, p in model.named_parameters() if n.endswith('pmu_quant.log2_exp')]
+    if exp_params:
+        exp_ids = {id(p) for p in exp_params}
+        params = [{'params': [p for p in model.parameters() if id(p) not in exp_ids],
+                   'lr': args.lr_init, 'weight_decay': args.weight_decay},
+                  {'params': exp_params, 'lr': args.lr_init, 'weight_decay': 0.0}]
+    else:
+        params = {'params': model.parameters(), 'lr': args.lr_init, 'weight_decay': args.weight_decay}
+        params = [params]
 
     optim_type = args.optim.lower()
 
@@ -268,3 +279,77 @@ def _max_norm(m):
             norm = w.norm(2, dim=0, keepdim=True).clamp(min=_max_norm_val / 2)
             desired = torch.clamp(norm, max=_max_norm_val)
             m.weight *= (desired / norm)
+
+def mark_scales_initialized(model, loaded_keys=None, log=None):
+    """Mark Brevitas runtime-stats scales as initialised so a LOADED ``value`` is used.
+
+    ``ParameterFromRuntimeStatsScaling`` keeps its stats counter as a plain attribute
+    (not in the state_dict). While ``counter < collect_stats_steps`` (300) its training
+    forward returns the running batch stat, and at step 300 ``init_scale()`` overwrites
+    ``value`` with it -- silently discarding a loaded scale. Brevitas 0.12.1's own
+    ``_load_from_state_dict`` already bumps the counter when ``value`` is present, but
+    we set it explicitly so resume/warm-start does not depend on that.
+    loaded_keys: if given, only modules whose ``<name>.value`` key is in it are marked.
+    Returns the number of modules marked."""
+    log = log or logger
+    try:
+        from brevitas.core.scaling.standalone import ParameterFromRuntimeStatsScaling
+    except ImportError:
+        return 0
+    loaded = None if loaded_keys is None else set(loaded_keys)
+    n = 0
+    for name, m in model.named_modules():
+        if isinstance(m, ParameterFromRuntimeStatsScaling):
+            if loaded is not None and f'{name}.value' not in loaded:
+                continue
+            m.counter = m.collect_stats_steps + 1
+            n += 1
+    log.info(f'mark_scales_initialized: {n} Brevitas runtime-stats scale module(s) marked '
+             f'initialised (loaded value is authoritative, no re-collection)')
+    return n
+
+
+def warm_start_from(model, path, batch, log=None):
+    """--init-from PATH: weights-only warm start (independent of --load).
+
+    1. Snapshot the fresh model's state (so target-only state stays FRESH).
+    2. One training-mode forward on a real collated batch under no_grad -- the
+       Brevitas materialization dance (scaling_impl.value only becomes a load target
+       after a training-mode forward), as in scripts/export_golden.py.
+    3. Copy every source key that exists in the target with a matching shape.
+    4. Restore the pre-dance value of every target key NOT copied, so e.g. the SPS
+       static exponent (exp_initialized=False, floor counters at 0) is still
+       data-initialised on the first real training batch.
+    Returns (loaded_keys, skipped_source_keys, fresh_target_keys).
+    """
+    log = log or logger
+    src = torch.load(path, map_location='cpu', weights_only=False)
+    src = src['model_state'] if isinstance(src, dict) and 'model_state' in src else src
+    before = {k: v.detach().clone() for k, v in model.state_dict().items()}
+    was_training = model.training
+    model.train()
+    with torch.no_grad():
+        model(batch)
+    model.train(was_training)
+    tgt = model.state_dict()
+    loaded = {k: v for k, v in src.items() if k in tgt and tuple(tgt[k].shape) == tuple(v.shape)}
+    skipped = sorted(k for k in src if k not in loaded)
+    fresh = sorted(k for k in tgt if k not in loaded)
+    restore = {k: before[k] for k in fresh if k in before}
+    merged = dict(tgt)
+    merged.update({k: v.to(tgt[k].device, tgt[k].dtype) for k, v in loaded.items()})
+    merged.update({k: v.to(tgt[k].device) for k, v in restore.items()})
+    model.load_state_dict(merged, strict=True)
+    mark_scales_initialized(model, loaded_keys=loaded.keys(), log=log)
+    log.info(f'--init-from {path}: loaded {len(loaded)}/{len(src)} source keys, '
+             f'skipped {len(skipped)} source keys, {len(fresh)} target keys left fresh')
+    log.info(f'  skipped source keys: {skipped}')
+    log.info(f'  fresh target keys:   {fresh}')
+    bad = [k for k in skipped + fresh if not k.split('.')[0] == 'pmu_quant'
+           and not k.startswith('module.pmu_quant.')]
+    if bad:
+        msg = ('!' * 78 + f'\nWARNING --init-from: NON-pmu_quant keys were not transferred: {bad}\n'
+               + '!' * 78)
+        log.warning(msg)
+        print(msg)
+    return sorted(loaded), skipped, fresh

@@ -58,7 +58,8 @@ def make_batch(B=4, N_particles=10, add_beams=True, dtype=torch.float, seed=42):
 
 def make_model(n_hidden=2, batchnorm=None, dropout=False, config='s',
                config_out='s', factorize=False, average_nobj=49,
-               device=torch.device('cpu'), dtype=torch.float, seed=0):
+               device=torch.device('cpu'), dtype=torch.float, seed=0, n_out=1,
+               head_hidden=0):
     """
     Build a PELICANNano model with fixed init seed.
     Default args match the minimal float-path configuration used for tests
@@ -83,6 +84,8 @@ def make_model(n_hidden=2, batchnorm=None, dropout=False, config='s',
         drop_rate=0.0,
         drop_rate_out=0.0,
         batchnorm=batchnorm,
+        n_out=n_out,
+        head_hidden=head_hidden,
         device=device,
         dtype=dtype,
     )

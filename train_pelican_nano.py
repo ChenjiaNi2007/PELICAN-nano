@@ -28,8 +28,8 @@ from src.models import tests
 from src.trainer import Trainer
 from src.trainer import init_argparse, init_file_paths, init_logger, init_cuda, logging_printout, fix_args
 from src.trainer import init_optimizer, init_scheduler
-from src.models.metrics_classifier import metrics, minibatch_metrics, minibatch_metrics_string
 from src.layers.quant import QuantConfig
+from src.trainer.args import validate_jet_quant_split
 
 from src.dataloaders import initialize_datasets, collate_fn
 
@@ -48,6 +48,9 @@ def main():
     # Fix possible inconsistencies in arguments
     args = fix_args(args)
 
+    # Fail fast on --jet-quant-split without --quant/--add-jet (before data loading)
+    validate_jet_quant_split(args)
+
     # Initialize logger
     init_logger(args)
 
@@ -63,13 +66,16 @@ def main():
     # Initialize dataloder
     if args.fix_data:
         torch.manual_seed(165937750084982)
-    args, datasets = initialize_datasets(args, args.datadir, num_pts=None)
+    # JetDataset(balance=True) interleaves is_signal==1/0 and silently DROPS jets whose
+    # label is not 0/1, so only balance for the binary is_signal target.
+    balance = (args.target == 'is_signal')
+    args, datasets = initialize_datasets(args, args.datadir, num_pts=None, balance=balance)
 
     # Fix possible inconsistencies in arguments
     args = fix_args(args)
 
     # Construct PyTorch dataloaders from datasets
-    collate = lambda data: collate_fn(data, scale=args.scale, nobj=args.nobj, add_beams=args.add_beams, beam_mass=args.beam_mass)
+    collate = lambda data: collate_fn(data, scale=args.scale, nobj=args.nobj, add_beams=args.add_beams, beam_mass=args.beam_mass, add_jet=args.add_jet)
     dataloaders = {split: DataLoader(dataset,
                                      batch_size=args.batch_size,
                                      shuffle=args.shuffle if (split == 'train') else False,
@@ -77,6 +83,13 @@ def main():
                                      worker_init_fn=seed_worker,
                                      collate_fn=collate)
                    for split, dataset in datasets.items()}
+
+    # SPS: the static exponent table has one entry per particle slot, so the
+    # particle axis must have a fixed length (nobj, plus the 2 prepended beams,
+    # plus the full-jet spurion with --add-jet).
+    if args.pmu_static_exp and args.nobj is None:
+        raise ValueError("--pmu-static-exp needs --nobj (fixed particle-slot count)")
+    pmu_n_slots = (args.nobj + (2 if args.add_beams else 0) + (1 if args.add_jet else 0)) if args.nobj is not None else 22
 
     # Build quantization config (disabled by default)
     quant_config = QuantConfig(
@@ -90,6 +103,14 @@ def main():
         pmu_block_fp=args.pmu_block_fp,
         pmu_exp_min=args.pmu_exp_min,
         pmu_exp_max=args.pmu_exp_max,
+        pmu_static_exp=args.pmu_static_exp,
+        pmu_n_slots=pmu_n_slots,
+        pmu_exp_floor_batches=args.pmu_exp_floor_batches,
+        pmu_exp_fixed=args.pmu_exp_fixed,
+        jet_quant_split=args.jet_quant_split,
+        jet_input_bit_width=args.jet_input_bit_width,
+        mjet_input_bit_width=args.mjet_input_bit_width,
+        jet_pmu_bit_width=args.jet_pmu_bit_width,
         weight_per_channel=args.weight_per_channel,
         po2_scales=args.po2_scales,
         allow_alpha_scaling=args.allow_alpha_scaling,
@@ -102,10 +123,18 @@ def main():
                         factorize=args.factorize, masked=args.masked,
                         activate_agg_out=args.activate_agg_out, activate_lin_out=args.activate_lin_out,
                         scale=args.scale, dropout=args.dropout, drop_rate=args.drop_rate, drop_rate_out=args.drop_rate_out, batchnorm=args.batchnorm,
-                        quant_config=quant_config,
+                        quant_config=quant_config, n_out=args.n_out, head_hidden=args.head_hidden,
                         device=device, dtype=dtype)
     
     model.to(device)
+
+    # --init-from: weights-only warm start (fresh optimizer/scheduler/epoch; independent
+    # of --load). Target-only state (e.g. the SPS static exponent) stays fresh.
+    if getattr(args, 'init_from', None):
+        from src.trainer.utils import warm_start_from
+        _b = next(iter(dataloaders['train']))
+        _b = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in _b.items()}
+        warm_start_from(model, args.init_from, _b)
 
     if args.parallel:
         model = torch.nn.DataParallel(model)
@@ -128,6 +157,14 @@ def main():
         tests(model, dataloaders['train'], args, tests=['gpu','irc', 'permutation'])
 
     # Instantiate the training class
+    if args.n_out > 1:
+        if args.target == 'is_signal':
+            logger.warning(f'--n-out {args.n_out} with --target is_signal: is_signal is 0/1, '
+                           'a K-class head trained on it is almost certainly a mistake (use --target label).')
+        from src.models.metrics_multiclass import metrics, minibatch_metrics, minibatch_metrics_string
+    else:
+        from src.models.metrics_classifier import metrics, minibatch_metrics, minibatch_metrics_string
+
     trainer = Trainer(args, dataloaders, model, loss_fn, metrics, minibatch_metrics, minibatch_metrics_string, optimizer, scheduler, restart_epochs, args.summarize_csv, args.summarize, device, dtype)
     
     # Load from checkpoint file. If no checkpoint file exists, automatically does nothing.

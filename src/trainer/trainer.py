@@ -113,6 +113,9 @@ class Trainer:
 
         checkpoint = torch.load(checkfile, map_location=torch.device(self.device), weights_only=False)
         self.model.load_state_dict(checkpoint['model_state'])
+        # every scale was loaded: never let Brevitas re-collect stats and overwrite it
+        from .utils import mark_scales_initialized
+        mark_scales_initialized(self.model, log=logger)
         if self.optimizer is not None:
             self.optimizer.load_state_dict(checkpoint['optimizer_state'])
         self.epoch = checkpoint['epoch']
@@ -252,6 +255,7 @@ class Trainer:
             self._warm_restart(epoch)
             self._step_lr_epoch()
             self._maybe_freeze_scales(epoch)
+            self._maybe_freeze_pmu_exp(epoch)
 
             train_predict, train_targets, epoch_t = self.train_epoch()
             train_metrics,_ = self.log_predict(train_predict, train_targets, 'train', epoch=epoch, epoch_t=epoch_t)
@@ -277,16 +281,42 @@ class Trainer:
 
         return self.best_epoch, self.best_metrics
 
+    def _maybe_freeze_pmu_exp(self, epoch):
+        """--pmu-exp-freeze-epoch N: from the start of epoch N (1-based) freeze ONLY the
+        SPS static exponents (``*pmu_quant.log2_exp``); every other quantizer scale keeps
+        training until --freeze-scales-epoch. Adam moves log2_exp ~lr per step whatever
+        the gradient size, so unfrozen exponents keep flipping integers. With N=1 the
+        freeze precedes the first batch; the data init writes ``.data`` and still runs."""
+        n = getattr(self.args, 'pmu_exp_freeze_epoch', 0) or 0
+        if n <= 0 or epoch < n or getattr(self, '_pmu_exp_frozen', False):
+            return
+        frozen = []
+        for name, param in self.model.named_parameters():
+            if name.endswith('pmu_quant.log2_exp') and param.requires_grad:
+                param.requires_grad_(False)
+                param.grad = None
+                frozen.append(name)
+        tables = []
+        for name, mod in self.model.named_modules():
+            if hasattr(mod, 'exponent_table') and getattr(mod, 'static', False):
+                init = bool(mod.exp_initialized)
+                tables.append(f'{name}: {mod.exponent_table().tolist()}'
+                              + ('' if init else ' (pre data-init; init on first batch)'))
+        self._pmu_exp_frozen = True
+        logger.info(f'Epoch {epoch}: froze SPS exponent param(s) {frozen}; table {tables}')
+
     def _maybe_freeze_scales(self, epoch):
         """--freeze-scales-epoch N: from the start of epoch N, learned quantizer scales
-        (Brevitas ``*.scaling_impl.value``) stop receiving gradients. AdamW skips
-        parameters whose grad is None, so no weight decay is applied to them either."""
+        (Brevitas ``*.scaling_impl.value``, and the SPS static block-FP exponent
+        ``pmu_quant.log2_exp``) stop receiving gradients. AdamW skips parameters whose
+        grad is None, so no weight decay is applied to them either."""
         n = getattr(self.args, 'freeze_scales_epoch', 0) or 0
         if n <= 0 or epoch < n or getattr(self, '_scales_frozen', False):
             return
         frozen = []
         for name, param in self.model.named_parameters():
-            if 'scaling_impl' in name and param.requires_grad:
+            is_scale = 'scaling_impl' in name or name.endswith('pmu_quant.log2_exp')
+            if is_scale and param.requires_grad:
                 param.requires_grad_(False)
                 param.grad = None
                 frozen.append(name)
@@ -298,7 +328,8 @@ class Trainer:
         Get the learning target.
         If a stats dictionary is included, return a normalized learning target.
         """
-        target_type = torch.long if self.args.target=='is_signal' else self.dtype
+        # Classification targets ('is_signal' binary, 'label' K-class indices) are class indices.
+        target_type = torch.long if self.args.target in ('is_signal', 'label') else self.dtype
         targets = data[self.args.target].to(self.device, target_type)
 
         return targets
