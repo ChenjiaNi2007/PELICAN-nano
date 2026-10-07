@@ -1,0 +1,5 @@
+h,mode,lr,decay,epochs,n_seeds,test_auc_mean,test_auc_std,test_auc_max,test_br03_mean,test_br03_std,best_valid_loss_mean,best_epoch_mean,seeds
+2,float,0.0025,cos,20,3,0.9531,0.0001,0.9531,108.4,0.4,0.2658,9.3,1 2 3
+4,float,0.0025,cos,20,3,0.9632,0.0006,0.9639,120.4,7.9,0.236,10,1 2 3
+2,qatf12,0.0025,cos,20,4,0.9514,0.0042,0.9541,69.7,7.9,0.2682,15.5,1 2 3 4
+4,qatf12,0.0025,cos,20,3,0.957,0.0017,0.9587,88.1,11.4,0.2552,16.3,1 2 3
