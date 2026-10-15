@@ -249,3 +249,16 @@ before (golden float test + param-count tests enforce it). Tests: `tests/test_je
   `--jet-quant-split`. Recommended **10 / 16 / 20**. Model-shaping: rebuild tools replay them.
 - **Firmware (not yet implemented).** Three dot types `dot_t` / `dotj_t` / `dotm_t` (pair / jet
   row+col / m²_jet) and a `jet_t` momentum type for the jet row. Tests: `tests/test_jet_quant_split.py`.
+
+## Phase 2 — plain N=16 h8 6-bit QAT (2026-10-15): the (E,px,py,pz) Mixer's firmware partner
+
+`h5n16_h8_qat_s1` = the phase-1 recipe + `--quant --po2-scales --weight-bit-width 6 --act-bit-width 6
+--input-bit-width 6 --pmu-bit-width 12 --freeze-scales-epoch 12` (20 epochs, CPU, 35 min; best = final).
+Test (260k): **52.22 % / macro AUC 81.54**, g/q/W/Z/t AUC 79.8 / 84.3 / 78.1 / 77.4 / 88.1 (row in
+`results/hls4ml5/summary.csv`) vs float h8 55.5-55.9 % / 83.1-83.4: the 6-bit drop is 3.4-3.7 pt,
+larger than the Mixer's HGQ drop (1.0 pt), with learned grids dots LSB 4 GeV^2 (+-128), momenta LSB
+0.25 GeV clipped at +-512 GeV (12.5 % of test jets carry a constituent above the clip; PyTorch clips
+identically). Not tuned: a wider momentum/dot grid (`--pmu-bit-width 14`, `--input-bit-width 8`) is
+the obvious next seed if the gap matters. Firmware export + 200/200 golden gate (needs
+`--bn-guard-bits 8`): `nPELICAN-fpga/reports/hls4ml5_h8_qat_gate/GATE.md`; synthesis steps in the
+nPELICAN-fpga README ("Synthesizing the plain 5-class model").
