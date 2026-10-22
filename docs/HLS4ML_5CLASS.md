@@ -262,3 +262,10 @@ identically). Not tuned: a wider momentum/dot grid (`--pmu-bit-width 14`, `--inp
 the obvious next seed if the gap matters. Firmware export + 200/200 golden gate (needs
 `--bn-guard-bits 8`): `nPELICAN-fpga/reports/hls4ml5_h8_qat_gate/GATE.md`; synthesis steps in the
 nPELICAN-fpga README ("Synthesizing the plain 5-class model").
+
+#### Phase 2 synthesis (2026-10-21, U250 @ 5 ns, `--bn-guard-bits 8` export)
+
+csynth 16 cyc / II=1 / 1,035 DSP; Vivado post-opt 160,426 LUT / 49,277 FF / 19,444 CARRY8 / 1,029 DSP
+(post-synth 160,690 / 49,280; DSP = 684 dots + 171 BN1 + 85 MAC + 95 rescales). Side by side with the (E,px,py,pz) Mixer (81.3k LUT / 28.6k FF /
+0 DSP / 21 cyc, 54.59 %): LUT 1.97x, FF 1.72x, +1,029 DSP, 5 cycles faster, 2.4 pt less accurate. Tables in
+`mlpmixer/hls4ml5/README.md` Step 5; reports in `nPELICAN-fpga/reports/{csynth,vsynth}_hls4ml5_h8n16*.rpt`.
