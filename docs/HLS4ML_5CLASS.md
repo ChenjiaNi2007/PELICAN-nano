@@ -267,5 +267,6 @@ nPELICAN-fpga README ("Synthesizing the plain 5-class model").
 
 csynth 16 cyc / II=1 / 1,035 DSP; Vivado post-opt 160,426 LUT / 49,277 FF / 19,444 CARRY8 / 1,029 DSP
 (post-synth 160,690 / 49,280; DSP = 684 dots + 171 BN1 + 85 MAC + 95 rescales). Side by side with the (E,px,py,pz) Mixer (81.3k LUT / 28.6k FF /
-0 DSP / 21 cyc, 54.59 %): LUT 1.97x, FF 1.72x, +1,029 DSP, 5 cycles faster, 2.4 pt less accurate. Tables in
-`mlpmixer/hls4ml5/README.md` Step 5; reports in `nPELICAN-fpga/reports/{csynth,vsynth}_hls4ml5_h8n16*.rpt`.
+0 DSP / 21 cyc, 54.59 %): LUT 1.97x, FF 1.72x, +1,029 DSP, 5 cycles faster, 2.4 pt less accurate. Deployment config (branch hls4ml5-deploy: Levers 8+9, const beams, sticky biases; 2026-10-22):
+128,240 LUT / 32,191 FF / 12,674 CARRY8 / 692 DSP / 16 cyc post-opt = 1.58x the Mixer's LUT + 692 DSP. Tables in
+`mlpmixer/hls4ml5/README.md` Steps 5-6; reports in `nPELICAN-fpga/reports/{csynth,vsynth}_hls4ml5_h8n16*.rpt`.
